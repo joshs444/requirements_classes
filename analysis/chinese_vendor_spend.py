@@ -111,7 +111,7 @@ def get_chinese_vendor_item_spend(purchase_data, item_data):
         )
         merged_spend['tariff_exclusion'] = merged_spend['hts'].str.startswith(prefixes).fillna(False).map({True: 'Yes', False: 'No'})
         
-        recent_costs = repo.get_most_recent_unit_cost(data=all_china_data)
+        recent_costs = repo.get_most_recent_purchase_data(data=all_china_data, fields=['item_no', 'vendor_name', 'order_date', 'unit_cost'], group_by='both')
         merged_spend = pd.merge(
             merged_spend,
             recent_costs[['item_no', 'vendor_name', 'order_date', 'unit_cost']],
@@ -120,6 +120,36 @@ def get_chinese_vendor_item_spend(purchase_data, item_data):
         )
         merged_spend = merged_spend.rename(columns={'order_date': 'last_purchase_date', 'unit_cost': 'last_unit_price'})
         
+        # Get most recent assigned user for each item
+        recent_assigned_users = repo.get_most_recent_purchase_data(data=all_china_data, 
+                                                                  fields=['item_no', 'assigned_user_id'], 
+                                                                  group_by='item')
+        if 'assigned_user_id' in recent_assigned_users.columns:
+            merged_spend = pd.merge(
+                merged_spend,
+                recent_assigned_users[['item_no', 'assigned_user_id']],
+                on='item_no',
+                how='left'
+            )
+            merged_spend['assigned_user_id'] = merged_spend['assigned_user_id'].fillna('Unassigned')
+        else:
+            merged_spend['assigned_user_id'] = 'Unassigned'
+        
+        # Get most recent cost_center for each item
+        recent_cost_centers = repo.get_most_recent_purchase_data(data=all_china_data,
+                                                               fields=['item_no', 'cost_center'],
+                                                               group_by='item')
+        if 'cost_center' in recent_cost_centers.columns:
+            merged_spend = pd.merge(
+                merged_spend,
+                recent_cost_centers[['item_no', 'cost_center']],
+                on='item_no',
+                how='left'
+            )
+            merged_spend['cost_center'] = merged_spend['cost_center'].fillna('Unassigned')
+        else:
+            merged_spend['cost_center'] = 'Unassigned'
+            
         return merged_spend.drop(columns=['total_value', 'multi_country'])
         
     except Exception as e:
@@ -142,11 +172,13 @@ def get_alternative_vendor_options(item_result, repo):
         item_no = row['item_no']
         original_vendor = row['vendor_name']
         original_price = row['last_unit_price']
+        assigned_user_id = row['assigned_user_id'] if 'assigned_user_id' in row else 'Unassigned'
+        cost_center = row['cost_center'] if 'cost_center' in row else 'Unassigned'
         alt_vendors = repo.get_vendors_for_item_excluding_countries(item_no, exclude_countries='CN')
         for _, alt_row in alt_vendors.iterrows():
             alt_vendor = alt_row['vendor_name']
             alt_country = alt_row['vendor_country'] if 'vendor_country' in alt_row else 'Unknown'
-            recent_cost = repo.get_most_recent_unit_cost(item_no=item_no, vendor_name=alt_vendor)
+            recent_cost = repo.get_most_recent_purchase_data(item_no=item_no, vendor_name=alt_vendor, fields=['item_no', 'vendor_name', 'order_date', 'unit_cost'], group_by='both')
             if not recent_cost.empty:
                 alt_price = recent_cost['unit_cost'].iloc[0]
                 alt_date = recent_cost['order_date'].iloc[0]
@@ -164,7 +196,9 @@ def get_alternative_vendor_options(item_result, repo):
                     'alternative_vendor_country': alt_country,
                     'alternative_last_order_date': alt_date,
                     'alternative_unit_price': alt_price,
-                    'percent_difference': percent_diff
+                    'percent_difference': percent_diff,
+                    'assigned_user_id': assigned_user_id,
+                    'cost_center': cost_center
                 })
     return pd.DataFrame(alt_vendor_list)
 

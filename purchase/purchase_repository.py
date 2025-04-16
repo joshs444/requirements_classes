@@ -265,8 +265,8 @@ class PurchaseRepository:
         vendors = df[['vendor_name', 'vendor_country']].drop_duplicates().sort_values('vendor_name')
         return vendors
 
-    def get_most_recent_unit_cost(self, item_no=None, vendor_name=None, start_date=None, end_date=None, data=None):
-        """Get the most recent unit_cost for specified item and/or vendor within an optional date range.
+    def get_most_recent_purchase_data(self, item_no=None, vendor_name=None, start_date=None, end_date=None, data=None, fields=None, group_by='both'):
+        """Get the most recent purchase data for specified item and/or vendor within an optional date range.
 
         Args:
             item_no (str, optional): Item number to filter by.
@@ -274,10 +274,11 @@ class PurchaseRepository:
             start_date (str, optional): Start date in YYYY-MM-DD format.
             end_date (str, optional): End date in YYYY-MM-DD format.
             data (pd.DataFrame, optional): Data to use. If None, uses all available purchase data.
+            fields (list, optional): List of fields to include in the result. If None, includes all fields.
+            group_by (str, optional): How to group the data - 'item', 'vendor', or 'both'. Defaults to 'both'.
 
         Returns:
-            pd.DataFrame: DataFrame with columns 'item_no', 'vendor_name', 'order_date', 'unit_cost'
-                          for the most recent records based on the filters.
+            pd.DataFrame: DataFrame with the most recent purchase data based on the filters.
         """
         if data is None:
             data = self.get_purchase_data().copy()
@@ -296,6 +297,19 @@ class PurchaseRepository:
             data = data[data['order_date'] <= pd.to_datetime(end_date)]
 
         data = data.sort_values('order_date', ascending=False)
-        data = data.drop_duplicates(subset=['item_no', 'vendor_name'])
-        result = data[['item_no', 'vendor_name', 'order_date', 'unit_cost']].sort_values(['item_no', 'vendor_name'])
+        
+        # Group by based on the specified parameter
+        if group_by == 'item':
+            data = data.drop_duplicates(subset=['item_no'])
+        elif group_by == 'vendor':
+            data = data.drop_duplicates(subset=['vendor_name'])
+        elif group_by == 'both':
+            data = data.drop_duplicates(subset=['item_no', 'vendor_name'])
+        else:
+            raise ValueError("group_by must be 'item', 'vendor', or 'both'")
+
+        if fields is None:
+            fields = data.columns
+
+        result = data[['item_no', 'vendor_name', 'order_date'] + [col for col in fields if col in data.columns and col not in ['item_no', 'vendor_name', 'order_date']]]
         return result
