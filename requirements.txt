@@ -2,4 +2,4 @@ pandas
 pyodbc
 sqlalchemy
 openpyxl
-    
+pyyaml

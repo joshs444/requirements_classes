@@ -1,0 +1,28 @@
+# config/tariff_exclusions.yml
+# ------------------------------------------------------------------
+# HTS prefixes that qualify for a Section‑301 tariff exclusion.
+# Use full 10‑digit codes *or* the first 4–6 digits of a chapter
+# (e.g., "8471" covers every HTS code that starts with 8471‑‑‑‑‑‑).
+# Add / delete lines as the USTR publishes new lists.
+# ------------------------------------------------------------------
+prefixes:
+  - "8517.13.00"
+  - "8471"
+  - "8517.62.00"
+  - "8473.30"
+  - "8528.52.00"
+  - "8542"
+  - "8486"
+  - "8524"
+  - "8523.51.00"
+  - "8541.10.00"
+  - "8541.21.00"
+  - "8541.29.00"
+  - "8541.30.00"
+  - "8541.49.10"
+  - "8541.49.70"
+  - "8541.49.80"
+  - "8541.49.95"
+  - "8541.51.00"
+  - "8541.59.00"
+  - "8541.90.00"
