@@ -16,7 +16,7 @@ from utils.config_utils import (
 logger = configure_logging()
 
 # Get the SQL query from the item.sql file
-item_query = read_sql_file('item.sql')
+item_query = read_sql_file('item/item.sql')
 
 def get_all_item_data():
     """Returns a DataFrame containing all item data."""

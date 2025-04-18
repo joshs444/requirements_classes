@@ -6,7 +6,7 @@ This module provides a command-line interface for performing vendor region analy
 import argparse
 from pathlib import Path
 
-from purchase.purchase_all_data import get_all_purchase_data
+from purchase.repository import PurchaseRepository
 from item.item_data import get_all_item_data
 from analysis.vendor_region_analysis.analysis import analyse_vendor_exposure
 from analysis.vendor_region_analysis.export import export_to_excel
@@ -21,8 +21,12 @@ def main():
                        help="Minimum spend threshold to include an item/vendor")
     args = parser.parse_args()
 
-    purchase_df = get_all_purchase_data()
+    # Get the purchase data and create a repository
+    purchase_df = get_all_item_data()  # Assuming this still returns a DataFrame
     item_df = get_all_item_data()
+    
+    # Create the repository from the purchase data
+    repo = PurchaseRepository(purchase_df)
 
     if purchase_df.empty:
         raise SystemExit("Purchase data frame is empty – aborting analysis.")
@@ -32,7 +36,7 @@ def main():
         "spend_threshold": args.threshold
     }
 
-    tables = analyse_vendor_exposure(purchase_df, item_df, cfg)
+    tables = analyse_vendor_exposure(repo, item_df, cfg)
     outfile = export_to_excel(tables, args.country, args.output_dir)
     print(f"Exported {args.country} vendor exposure workbook → {outfile.absolute()}")
 
