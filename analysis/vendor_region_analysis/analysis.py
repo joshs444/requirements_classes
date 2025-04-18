@@ -68,6 +68,7 @@ def analyse_vendor_exposure(repo: PurchaseRepository,
 
     # Use the new PurchaseQueries for most_recent_purchase_data
     alt_all = queries.get_most_recent_purchase_data(
+        item_no=None, vendor_name=None,
         fields=["item_no", "vendor_name", "order_date", "unit_cost", "vendor_country"],
         group_by="both"
     ).rename(columns={

@@ -93,9 +93,7 @@ def get_vendor_item_spend(repo: PurchaseRepository,
 
     # Use queries for multi-country identification
     multi = queries.identify_items_from_multiple_countries(
-        country=cfg["country"],
-        start_date=start_date.strftime("%Y-%m-%d"),
-        end_date=end_date.strftime("%Y-%m-%d")
+        country=cfg["country"]
     )
     df = (df.merge(multi, on="item_no", how="left")
           .assign(alternative_vendor=lambda d: d["multi_country"].fillna("No"))
@@ -114,7 +112,7 @@ def get_vendor_item_spend(repo: PurchaseRepository,
     recent_cols = ["item_no", "vendor_name", "order_date", "unit_cost",
                    "assigned_user_id", "cost_center"]
     recent = queries.get_most_recent_purchase_data(
-        fields=recent_cols,
+        item_no=None, vendor_name=None, fields=recent_cols,
         group_by="both"
     )
     df = (df.merge(recent[recent_cols], on=["item_no", "vendor_name"], how="left")
@@ -126,7 +124,7 @@ def get_vendor_item_spend(repo: PurchaseRepository,
 
     # Get most recent purchase data for all vendors
     all_recent = queries.get_most_recent_purchase_data(
-        fields=["item_no", "vendor_name", "unit_cost"],
+        item_no=None, vendor_name=None, fields=["item_no", "vendor_name", "unit_cost"],
         group_by="both"
     )
     non_cn = all_recent.merge(

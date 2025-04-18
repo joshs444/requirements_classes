@@ -27,10 +27,16 @@ from typing import Dict, Tuple
 import pandas as pd
 import yaml
 
-from purchase.purchase_repository import PurchaseRepository
-from purchase.purchase_all_data import get_all_purchase_data
+from purchase.repository import PurchaseRepository
+from purchase.analytics import PurchaseAnalytics
+from purchase.queries import PurchaseQueries
 from utils.time_utils import TimeUtils
-from item.item_data import get_all_item_data
+from utils.config_utils import (
+    read_sql_file,
+    get_database_engine,
+    load_and_process_data,
+    configure_logging
+)
 
 # ────────────────────────────────────────────────────────────────────────────
 # 0. Configuration helpers
@@ -68,18 +74,22 @@ def _filter_country(df: pd.DataFrame, country: str) -> pd.DataFrame:
 # 2. Core calculators
 # ────────────────────────────────────────────────────────────────────────────
 def _get_vendor_spend(repo: PurchaseRepository,
+                      queries: PurchaseQueries,
+                      analytics: PurchaseAnalytics,
                       start_date: pd.Timestamp,
                       end_date: pd.Timestamp,
                       *,
                       cfg: Dict) -> pd.DataFrame:
-    df_all = repo.get_purchase_data()
+    df_all = repo.all()
     china = _filter_country(df_all, cfg["country"])
     past_year = china.query("@start_date <= order_date <= @end_date")
 
-    open_sp = (repo.group_by_and_sum("vendor_name", "open", data=china)
-               .rename(columns={"open_value": "all_open_spend"}))
-    delivered = (repo.group_by_and_sum("vendor_name", "delivered", data=past_year)
-                 .rename(columns={"delivered_value": "delivered_spend_past_year"}))
+    # Use analytics for grouping and summing
+    open_sp = analytics.group_value(by="vendor_name", kind="open", frame=china)
+    open_sp = open_sp.rename(columns={"open": "all_open_spend"})
+    
+    delivered = analytics.group_value(by="vendor_name", kind="delivered", frame=past_year)
+    delivered = delivered.rename(columns={"delivered": "delivered_spend_past_year"})
 
     out = open_sp.merge(delivered, how="outer").fillna(0)
     out["total_value"] = out["all_open_spend"] + out["delivered_spend_past_year"]
@@ -90,24 +100,29 @@ def _get_vendor_spend(repo: PurchaseRepository,
 
 
 def _get_vendor_item_spend(repo: PurchaseRepository,
+                           queries: PurchaseQueries,
+                           analytics: PurchaseAnalytics,
                            item_df: pd.DataFrame,
                            start_date: pd.Timestamp,
                            end_date: pd.Timestamp,
                            *,
                            cfg: Dict) -> pd.DataFrame:
-    df_all = repo.get_purchase_data()
-    china_items = _filter_country(repo.filter_by_type("Item"), cfg["country"])
+    df_all = repo.all()
+    china_items = _filter_country(queries.filter_by_type("Item"), cfg["country"])
     past_year = china_items.query("@start_date <= order_date <= @end_date")
 
-    open_sp = (repo.group_by_and_sum(["vendor_name", "item_no"], "open", data=china_items)
-               .rename(columns={"open_value": "all_open_spend"}))
-    deliv_sp = (repo.group_by_and_sum(["vendor_name", "item_no"], "delivered", data=past_year)
-                .rename(columns={"delivered_value": "delivered_spend_past_year"}))
+    # Use analytics for grouping and summing
+    open_sp = analytics.group_value(by=["vendor_name", "item_no"], kind="open", frame=china_items)
+    open_sp = open_sp.rename(columns={"open": "all_open_spend"})
+    
+    deliv_sp = analytics.group_value(by=["vendor_name", "item_no"], kind="delivered", frame=past_year)
+    deliv_sp = deliv_sp.rename(columns={"delivered": "delivered_spend_past_year"})
+    
     df = open_sp.merge(deliv_sp, how="outer").fillna(0)
     df["total_value"] = df["all_open_spend"] + df["delivered_spend_past_year"]
     df = df[df["total_value"] >= cfg["spend_threshold"]].drop(columns="total_value")
 
-    multi = repo.identify_items_from_multiple_countries(cfg["country"])
+    multi = queries.identify_items_from_multiple_countries(cfg["country"])
     df = (df.merge(multi, on="item_no", how="left")
           .assign(alternative_vendor=lambda d: d["multi_country"].fillna("No"))
           .drop(columns=["multi_country"]))
@@ -123,8 +138,8 @@ def _get_vendor_item_spend(repo: PurchaseRepository,
 
     recent_cols = ["item_no", "vendor_name", "order_date", "unit_cost",
                    "assigned_user_id", "cost_center"]
-    recent = repo.get_most_recent_purchase_data(
-        data=china_items, fields=recent_cols, group_by="both"
+    recent = queries.get_most_recent_purchase_data(
+        item_no=None, vendor_name=None, fields=recent_cols, group_by="both"
     )
     df = (df.merge(recent[recent_cols], on=["item_no", "vendor_name"], how="left")
           .rename(columns={
@@ -133,9 +148,8 @@ def _get_vendor_item_spend(repo: PurchaseRepository,
           })
           .fillna({"assigned_user_id": "Unassigned", "cost_center": "Unassigned"}))
 
-    all_recent = repo.get_most_recent_purchase_data(
-        data=df_all,
-        fields=["item_no", "vendor_name", "unit_cost"],
+    all_recent = queries.get_most_recent_purchase_data(
+        item_no=None, vendor_name=None, fields=["item_no", "vendor_name", "unit_cost"],
         group_by="both"
     )
     non_cn = all_recent.merge(
@@ -221,10 +235,12 @@ def analyse_china_exposure(purchase_df: pd.DataFrame,
     cfg = {**_DEFAULT_CFG, **(cfg or {})}
     start_date, end_date = TimeUtils.get_period_dates("year")
     repo = PurchaseRepository(purchase_df)
+    analytics = PurchaseAnalytics(repo)
+    queries = PurchaseQueries(repo)
 
     # Vendor and item spend
-    by_vendor   = _get_vendor_spend(repo, start_date, end_date, cfg=cfg)
-    by_item     = _get_vendor_item_spend(repo, item_df, start_date, end_date, cfg=cfg)
+    by_vendor   = _get_vendor_spend(repo, queries, analytics, start_date, end_date, cfg=cfg)
+    by_item     = _get_vendor_item_spend(repo, queries, analytics, item_df, start_date, end_date, cfg=cfg)
     vendor_info = _build_vendor_action_plan(by_item, cfg)
 
     # Vendor × Item Detail
@@ -252,8 +268,8 @@ def analyse_china_exposure(purchase_df: pd.DataFrame,
         "delivered_spend_past_year": "past_year_spend"
     }).reset_index(drop=True)
 
-    alt_all = repo.get_most_recent_purchase_data(
-        data=purchase_df,
+    alt_all = queries.get_most_recent_purchase_data(
+        item_no=None, vendor_name=None,
         fields=["item_no", "vendor_name", "order_date", "unit_cost", "vendor_country"],
         group_by="both"
     ).rename(columns={
@@ -323,6 +339,20 @@ def _export_to_excel(tables: Dict[str, pd.DataFrame], output_dir: str = "output"
 # ────────────────────────────────────────────────────────────────────────────
 # 6. CLI entry‑point
 # ────────────────────────────────────────────────────────────────────────────
+def get_all_purchase_data():
+    """Returns a DataFrame containing all purchase data using SQL query."""
+    engine = get_database_engine()
+    purchase_query = read_sql_file('purchase/purchase_all.sql')
+    logger = configure_logging()
+    return load_and_process_data(query=purchase_query, engine=engine, logger=logger)
+
+def get_all_item_data():
+    """Returns a DataFrame containing all item data using SQL query."""
+    engine = get_database_engine()
+    item_query = read_sql_file('item/item.sql')
+    logger = configure_logging()
+    return load_and_process_data(query=item_query, engine=engine, logger=logger)
+
 if __name__ == "__main__":
     purchase_df = get_all_purchase_data()
     item_df = get_all_item_data()

@@ -7,6 +7,7 @@ import argparse
 from pathlib import Path
 
 from purchase.repository import PurchaseRepository
+from purchase.data_loader import get_all_purchase_data
 from item.item_data import get_all_item_data
 from analysis.vendor_region_analysis.analysis import analyse_vendor_exposure
 from analysis.vendor_region_analysis.export import export_to_excel
@@ -22,7 +23,7 @@ def main():
     args = parser.parse_args()
 
     # Get the purchase data and create a repository
-    purchase_df = get_all_item_data()  # Assuming this still returns a DataFrame
+    purchase_df = get_all_purchase_data()
     item_df = get_all_item_data()
     
     # Create the repository from the purchase data
