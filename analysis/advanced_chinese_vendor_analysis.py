@@ -40,8 +40,7 @@ _DEFAULT_CFG: Dict = {
     "spend_threshold": 1_000,            # Minimum $ exposure to keep a row
     "tariff_prefix_file": Path("config/tariff_exclusions.yml"),
     # Price‑delta buckets
-    "shift_now_threshold": 0.25,         # ≤25% premium counts as shift now
-    "near_parity_threshold": 0.10,       # ≤10% premium counts as near‑parity
+    "shift_now_threshold": 0.50,         # ≤50% premium counts as shift now
 }
 
 def _load_yaml_prefixes(path: Path) -> Tuple[str, ...]:
@@ -166,8 +165,6 @@ def _get_vendor_item_spend(repo: PurchaseRepository,
             return "Analyse"
         if r["cost_delta_pct"] <= cfg["shift_now_threshold"]:
             return "Shift now"
-        if r["cost_delta_pct"] <= cfg["near_parity_threshold"]:
-            return "Quote / negotiate"
         return "Monitor"
 
     df["sourcing_action"] = df.apply(_sourcing_action, axis=1)
