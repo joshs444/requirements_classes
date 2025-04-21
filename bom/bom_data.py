@@ -17,8 +17,8 @@ from utils.config_utils import (
 
 logger = configure_logging()
 
-# Get the SQL query from the bom_all.sql file
-bom_query = read_sql_file('bom_all.sql')
+# Get the SQL query from the bom.sql file
+bom_query = read_sql_file('sql/bom/bom.sql')
 
 def get_all_bom_data():
     """Returns a DataFrame containing all BOM data."""

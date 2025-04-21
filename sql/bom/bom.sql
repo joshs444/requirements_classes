@@ -11,6 +11,7 @@ INNER JOIN
 WHERE
     p.[Quantity per] != 0
     AND p.[No_] IS NOT NULL
+    AND p.[Production BOM No_] != p.[No_]
 GROUP BY
     p.[Production BOM No_],
     p.[No_]
