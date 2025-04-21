@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Dict
 
 import pandas as pd
+from item.item_data import get_all_item_data
 
 def export_to_excel(tables: Dict[str, pd.DataFrame], 
                    country_code: str = "vendor",

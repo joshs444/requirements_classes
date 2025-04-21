@@ -2,7 +2,7 @@
 """
 DAG‑based multi‑level BOM explosion (cycle‑tolerant).
 
-• Only explodes parents whose replenishment_system == 'Output'
+• Only explodes parents whose purchase_output contains 'Output'
 • Detects BOM cycles, snips one edge per cycle, logs the removals
 • Produces a flat DataFrame: order, parent_item, level,
   parent_index, component_item, qty_per, total_qty
@@ -118,14 +118,14 @@ def explode_parent(
 # ─── 3. End‑to‑end explosion for Output parents ───────────────────────────────
 def explode_output_boms(bom_df: pd.DataFrame, item_df: pd.DataFrame) -> pd.DataFrame:
     """
-    Explode multi‑level BOMs only for items where replenishment_system == 'Output'.
+    Explode multi‑level BOMs only for items where purchase_output contains 'Output'.
     Returns a DataFrame with exploded hierarchy.
     """
     g = build_bom_graph(bom_df)
 
-    # Select only parents of type 'Output'
+    # Select only parents that have 'Output' in purchase_output
     output_parents = item_df.loc[
-        item_df.replenishment_system == "Output", "item_no"
+        item_df.purchase_output.str.contains("Output", na=False), "item_no"
     ].unique().tolist()
 
     logger.info("Exploding %d top‑level Output parents", len(output_parents))
