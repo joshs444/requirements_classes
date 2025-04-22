@@ -6,3 +6,4 @@ pyyaml
 networkx
 pyarrow
 fastparquet
+xlsxwriter
