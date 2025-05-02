@@ -52,6 +52,7 @@ GROUP BY pl.[No_];
 
 CREATE CLUSTERED INDEX IX_OpenPO_No ON #OpenPO ([No_]);
 
+WITH base AS (
 SELECT
     it.row_index,
     it.[No_] AS item_no,
@@ -111,4 +112,14 @@ LEFT JOIN #Ledger9m ls
        ON it.[No_] = ls.[Item No_]
 LEFT JOIN #OpenPO op
        ON it.[No_] = op.[No_]
-ORDER BY it.row_index;
+)
+SELECT
+    base.*,
+    CASE
+        WHEN base.inventory_posting_group = 'FIN GOODS' THEN 'No'
+        WHEN base.purchase_output = 'Purchase'
+             AND base.last_9m_output_qty = 0 THEN 'Yes'
+        ELSE 'No'
+    END AS raw_mat_flag
+FROM base
+ORDER BY base.row_index;
