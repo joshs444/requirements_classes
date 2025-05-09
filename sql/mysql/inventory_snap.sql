@@ -1,17 +1,53 @@
 /*─────────────────────────────────────────────────────────────
-  REBUILD inv_snapshot  – run manually whenever you want it fresh
+  A)  ENSURE THE COVERING INDEX IS PRESENT
+─────────────────────────────────────────────────────────────*/
+-- 1. If idx_ledger_covering already exists, drop it
+SET @idx_exists := (
+    SELECT 1
+    FROM information_schema.statistics
+    WHERE table_schema = DATABASE()
+      AND table_name   = 'ledger_all'
+      AND index_name   = 'idx_ledger_covering'
+    LIMIT 1
+);
+
+SET @sql_drop :=
+    IF(@idx_exists = 1,
+       'ALTER TABLE ledger_all DROP INDEX idx_ledger_covering',
+       'SELECT "idx_ledger_covering was not present — nothing to drop"');
+
+PREPARE stmt FROM @sql_drop;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+
+-- 2. Re‑create the composite covering index (no prefix lengths → avoids error 1089)
+ALTER TABLE ledger_all
+  ADD INDEX idx_ledger_covering (
+    Subsidiary,
+    `Item No_`,
+    `Location Code`,
+    `Posting Date`,
+    Quantity,
+    `SUM_Root_Cost_Actual_USD`,
+    `SUM_Root_Cost_Expected_USD`,
+    `SUM_Cost_Amount_Actual_USD`,
+    `SUM_Cost_Amount_Expected_USD`
+  );
+
+/*─────────────────────────────────────────────────────────────
+  B)  REBUILD inv_snapshot  (run whenever you want it fresh)
 ─────────────────────────────────────────────────────────────*/
 START TRANSACTION;
 
-/* 0) parameters you may tweak every run */
-SET @sub            = 'US01';            -- subsidiary filter
-SET @slice_start    = '2020-01-01';      -- earliest day you want detailed history
+/* 0) Parameters to tweak per run */
+SET @sub         = 'US01';            -- subsidiary filter
+SET @slice_start = '2020-01-01';      -- earliest date to keep detailed history
 
-/* 1) seed opening balances (everything BEFORE @slice_start) */
+/* 1) Seed opening balances (everything before @slice_start) */
 DROP TEMPORARY TABLE IF EXISTS tmp_open;
-CREATE TEMPORARY TABLE tmp_open ENGINE=InnoDB AS
+CREATE TEMPORARY TABLE tmp_open ENGINE = InnoDB AS
 SELECT
-    DATE_SUB(@slice_start, INTERVAL 1 DAY)      AS snapshot_date,
+    DATE_SUB(@slice_start, INTERVAL 1 DAY)         AS snapshot_date,
     `Item No_`          AS item_no,
     `Location Code`     AS location_code,
     SUM(Quantity)                               AS daily_qty,
@@ -24,14 +60,14 @@ WHERE TRIM(Subsidiary) = @sub
   AND `Posting Date`  < @slice_start
 GROUP BY item_no, location_code;
 
-/* 2) build span rows (seed + @slice_start → today) */
+/* 2) Build span rows (@slice_start → today) */
 DROP TEMPORARY TABLE IF EXISTS tmp_spans;
-CREATE TEMPORARY TABLE tmp_spans ENGINE=InnoDB AS
+CREATE TEMPORARY TABLE tmp_spans ENGINE = InnoDB AS
 WITH daily AS (
-    /* opening snapshot row */
+    -- opening row
     SELECT * FROM tmp_open
     UNION ALL
-    /* all quantity‑moving ledger rows for the slice */
+    -- quantity‑moving ledger rows within the slice
     SELECT
         CAST(`Posting Date` AS DATE)           AS snapshot_date,
         `Item No_`          AS item_no,
@@ -41,24 +77,21 @@ WITH daily AS (
            +`SUM_Root_Cost_Expected_USD`)           AS daily_root,
         SUM(`SUM_Cost_Amount_Actual_USD`
            +`SUM_Cost_Amount_Expected_USD`)         AS daily_cost
-    FROM  ledger_all  USE INDEX(idx_ledger_covering)
+    FROM  ledger_all USE INDEX (idx_ledger_covering)
     WHERE TRIM(Subsidiary) = @sub
       AND Quantity <> 0
-      AND `Posting Date`  >= @slice_start
+      AND `Posting Date` >= @slice_start
     GROUP BY snapshot_date, item_no, location_code
 ),
 running AS (
     SELECT
         d.*,
         SUM(d.daily_qty)  OVER (PARTITION BY item_no,location_code
-                                ORDER BY snapshot_date)
-            AS qty_on_hand,
+                                ORDER BY snapshot_date) AS qty_on_hand,
         SUM(d.daily_root) OVER (PARTITION BY item_no,location_code
-                                ORDER BY snapshot_date)
-            AS total_root,
+                                ORDER BY snapshot_date) AS total_root,
         SUM(d.daily_cost) OVER (PARTITION BY item_no,location_code
-                                ORDER BY snapshot_date)
-            AS total_cost
+                                ORDER BY snapshot_date) AS total_cost
     FROM daily d
 ),
 changes AS (
@@ -70,13 +103,11 @@ changes AS (
     WINDOW w AS (PARTITION BY item_no,location_code ORDER BY snapshot_date)
 ),
 starts AS (
-    /* keep rows where the running balance changed */
     SELECT *
     FROM changes
-    WHERE prev_qty IS NULL
-       OR prev_qty <> qty_on_hand
-       OR prev_root <> total_root
-       OR prev_cost <> total_cost
+    WHERE prev_qty  IS NULL OR prev_qty  <> qty_on_hand
+       OR prev_root IS NULL OR prev_root <> total_root
+       OR prev_cost IS NULL OR prev_cost <> total_cost
 )
 SELECT
     item_no,
@@ -89,8 +120,8 @@ SELECT
 FROM starts
 WINDOW w AS (PARTITION BY item_no,location_code ORDER BY snapshot_date);
 
-/* 3) replace inv_snapshot with fresh data */
-TRUNCATE TABLE inv_snapshot;      -- wipe old spans
+/* 3) Swap old data with new spans */
+TRUNCATE TABLE inv_snapshot;
 
 INSERT INTO inv_snapshot
   (item_no ,location_code ,balance_start ,balance_end ,
@@ -101,7 +132,7 @@ SELECT
 FROM tmp_spans
 ORDER BY item_no, location_code, balance_start;
 
-/* 4) cleanup */
+/* 4) Clean up */
 DROP TEMPORARY TABLE IF EXISTS tmp_open;
 DROP TEMPORARY TABLE IF EXISTS tmp_spans;
 

@@ -1,14 +1,18 @@
 /*************************************************************************************************
-  Procurement Analytics – FULL STAND-ALONE SCRIPT
-  v8.3 (May 2025) — adds Manufacturer fields + moves Order Date to first column
+  Procurement Analytics – FULL STAND-ALONE SCRIPT   (v8.3-CA, May 2025)
+  • Adds Manufacturer Code | Manufacturer Part No_  (already in CA source)
+  • Moves Order Date to the first column of the final SELECT
+  • Adds item_index  = Subsidiary + Item No_
   • 1-year (365 d) & 2-year (730 d) price windows
   • Item + vendor adaptive baselines in an OUTER APPLY block
   • Single-source flag, high-volume PO & spend flags, SLA metrics
+  • UPDATED for the IPG Canada data mart
+      – Table prefixes "IPG Photonics Corporation" → "IPG Canada"
+      – Subsidiary code = CA010
+      – *Assigned User ID* not present in Canada headers
 **************************************************************************************************/
 
-/* ============================================================
-   0. Parameters – adjust once and reuse
-   ============================================================ */
+/* ============================================================ 0. Parameters */
 DECLARE @w1y       INT   = 365;      -- 1-year look-back (days)
 DECLARE @w2y       INT   = 730;      -- 2-year look-back (days)
 DECLARE @hv_po     INT   = 12;       -- high-volume PO threshold (count)
@@ -16,9 +20,7 @@ DECLARE @hv_spend  MONEY = 100000;   -- high-volume spend threshold ($)
 DECLARE @hv_window INT   = 365;      -- window (days) for hv flags
 SET NOCOUNT ON;
 
-/* ============================================================
-   1. Build #LineData  (history + open lines)
-   ============================================================ */
+/* ============================================================ 1. #LineData  */
 IF OBJECT_ID('tempdb..#LineData') IS NOT NULL DROP TABLE #LineData;
 
 SELECT
@@ -40,18 +42,20 @@ SELECT
     src.[Outstanding Quantity] * src.qty_factor AS [Outstanding Quantity],
     src.[Unit Cost (LCY)] / src.qty_factor      AS [Unit Cost],
     src.[Requested Receipt Date],
+    /* ---- manufacturer refs first (matches US v8.3 order) ---- */
     src.[Manufacturer Part No_],
     src.[Manufacturer Code],
+    /* ---- calc totals & delivered qty ----------------------- */
     ([Quantity] - [Outstanding Quantity])
         * ([Unit Cost (LCY)] / src.qty_factor)  AS [Total],
     ([Quantity] - [Outstanding Quantity])
         * src.qty_factor                        AS [Quantity Delivered],
-    'US010'                                     AS [Subsidiary]
+    'CA010'                                     AS [Subsidiary]
 INTO #LineData
 FROM (
-    /* -------------------------------------------------------- HISTORY lines */
+    /* ---------- HISTORY lines ---------- */
     SELECT
-        'HISTORY' AS [Status],
+        'HISTORY'                                AS [Status],
         l.[Document Type],
         l.[Document No_],
         l.[Line No_],
@@ -66,14 +70,14 @@ FROM (
         l.[Promised Receipt Date],
         l.[Planned Receipt Date],
         l.[Description],
-        COALESCE(NULLIF(l.[Qty_ per Unit of Measure],0),1) AS qty_factor,
+        COALESCE(NULLIF(l.[Qty_ per Unit of Measure],0),1)      AS qty_factor,
         l.[Quantity],
         l.[Outstanding Quantity],
         l.[Unit Cost (LCY)],
         l.[Requested Receipt Date],
         l.[Manufacturer Part No_],
         l.[Manufacturer Code]
-    FROM [dbo].[IPG Photonics Corporation$Purchase History Line] l
+    FROM [dbo].[IPG Canada$Purchase History Line] l
     WHERE l.[Order Date] > '2019-01-01'
       AND l.[Quantity] > 0
       AND l.[Unit Cost (LCY)] > 0
@@ -83,7 +87,7 @@ FROM (
 
     UNION ALL
 
-    /* -------------------------------------------------------- OPEN lines */
+    /* ---------- OPEN lines -------------- */
     SELECT
         'OPEN',
         l.[Document Type],
@@ -107,7 +111,7 @@ FROM (
         l.[Requested Receipt Date],
         l.[Manufacturer Part No_],
         l.[Manufacturer Code]
-    FROM [dbo].[IPG Photonics Corporation$Purchase Line] l
+    FROM [dbo].[IPG Canada$Purchase Line] l
     WHERE l.[Order Date] > '2019-01-01'
       AND l.[Quantity] > 0
       AND l.[Unit Cost (LCY)] > 0
@@ -116,34 +120,32 @@ FROM (
 ) src;
 
 CREATE CLUSTERED INDEX IX_LineData_DocLineItem
-    ON #LineData ([Document No_], [Line No_], [No_]);
+        ON #LineData ([Document No_], [Line No_], [No_]);
 
-/* ============================================================
-   2. Build #HeaderData
-   ============================================================ */
+/* ============================================================ 2. #HeaderData */
 IF OBJECT_ID('tempdb..#HeaderData') IS NOT NULL DROP TABLE #HeaderData;
 
 SELECT
     h.[Document Type],
-    h.[No_]                         AS [Doc_No_],
+    h.[No_]                    AS [Doc_No_],
     h.[Order Date],
     h.[Posting Date],
-    h.[Assigned User ID],
+    /*  Assigned User ID was dropped in CA – keep omitted  */
     h.[Order Confirmation Date],
     h.[Purchaser Code],
-    'US010'                         AS [Subsidiary]
+    'CA010'                    AS [Subsidiary]
 INTO #HeaderData
 FROM (
     SELECT [Document Type],[No_],[Order Date],[Posting Date],
-           [Assigned User ID],[Order Confirmation Date],[Purchaser Code]
-    FROM [dbo].[IPG Photonics Corporation$Purchase History Header]
+           [Order Confirmation Date],[Purchaser Code]
+    FROM [dbo].[IPG Canada$Purchase History Header]
     WHERE [Order Date] > '2018-12-31'
       AND [Document Type] = 1
       AND [Buy-from Vendor No_] <> ''
     UNION ALL
     SELECT [Document Type],[No_],[Order Date],[Posting Date],
-           [Assigned User ID],[Order Confirmation Date],[Purchaser Code]
-    FROM [dbo].[IPG Photonics Corporation$Purchase Header]
+           [Order Confirmation Date],[Purchaser Code]
+    FROM [dbo].[IPG Canada$Purchase Header]
     WHERE [Order Date] > '2018-12-31'
       AND [Document Type] = 1
       AND [Buy-from Vendor No_] <> ''
@@ -152,9 +154,7 @@ FROM (
 CREATE UNIQUE CLUSTERED INDEX IX_HeaderData_Doc
         ON #HeaderData ([Doc_No_]);
 
-/* ============================================================
-   3. Build #Receipts  (earliest receipt per PO line)
-   ============================================================ */
+/* ============================================================ 3. #Receipts  */
 IF OBJECT_ID('tempdb..#Receipts') IS NOT NULL DROP TABLE #Receipts;
 
 SELECT
@@ -163,7 +163,7 @@ SELECT
     [No_]       AS item_no,
     MIN([Posting Date]) AS posting_date
 INTO #Receipts
-FROM [dbo].[IPG Photonics Corporation$Purch_ Rcpt_ Line]
+FROM [dbo].[IPG Canada$Purch_ Rcpt_ Line]
 WHERE [Quantity] > 0
   AND [Posting Date] > '2017-12-31'
 GROUP BY [Line No_], [Order No_], [No_];
@@ -171,9 +171,7 @@ GROUP BY [Line No_], [Order No_], [No_];
 CREATE UNIQUE CLUSTERED INDEX IX_Receipts_OrderLineItem
         ON #Receipts (order_no, line_no, item_no);
 
-/* ============================================================
-   4.  Final SELECT – baselines, KPIs, flags
-   ============================================================ */
+/* ============================================================ 4. Final SELECT */
 SELECT
     /* ---------- Order date FIRST --------------------------- */
     h.[Order Date]                     AS order_date,
@@ -286,17 +284,19 @@ SELECT
     l.[Quantity Delivered],
     DATEDIFF(day, h.[Order Date], l.[Promised Receipt Date])     AS promised_lead_time_days,
     DATEDIFF(day, h.[Order Date], r.posting_date)                AS actual_lead_time_days,
-    h.[Assigned User ID]               AS assigned_user_id,
     h.[Order Confirmation Date]        AS order_confirmation_date,
     h.[Purchaser Code]                 AS purchaser_code,
     l.[Subsidiary]                     AS subsidiary,
+
+    /* ---------- NEW: item_index ---------------------------- */
     l.[Subsidiary] + l.[No_]           AS item_index,
+    /* ---------- NEW: vendor_index -------------------------- */
     l.[Subsidiary] + l.[Buy-from Vendor No_] AS vendor_index
 FROM #LineData  AS l
 JOIN #HeaderData AS h
       ON l.[Document No_] = h.[Doc_No_]
 
-/* ---------- 1-year baseline (item only) -------------------- */
+/* ---------- Baseline & KPI helper OUTER APPLY blocks (unchanged) ----- */
 OUTER APPLY (
     SELECT SUM(ld.quantity * ld.[Unit Cost]) /
            NULLIF(SUM(ld.quantity),0) AS avg_price
@@ -307,7 +307,6 @@ OUTER APPLY (
       AND  hd.[Order Date] BETWEEN DATEADD(day,-@w1y,h.[Order Date]) AND h.[Order Date]-1
 ) AS b1y
 
-/* ---------- 2-year baseline (item only) -------------------- */
 OUTER APPLY (
     SELECT SUM(ld.quantity * ld.[Unit Cost]) /
            NULLIF(SUM(ld.quantity),0) AS avg_price
@@ -318,7 +317,6 @@ OUTER APPLY (
       AND  hd.[Order Date] BETWEEN DATEADD(day,-@w2y,h.[Order Date]) AND h.[Order Date]-1
 ) AS b2y
 
-/* ---------- 1-year baseline (item + vendor) ---------------- */
 OUTER APPLY (
     SELECT SUM(ld.quantity * ld.[Unit Cost]) /
            NULLIF(SUM(ld.quantity),0) AS avg_price_vendor
@@ -330,7 +328,6 @@ OUTER APPLY (
       AND  hd.[Order Date] BETWEEN DATEADD(day,-@w1y,h.[Order Date]) AND h.[Order Date]-1
 ) AS b1y_v
 
-/* ---------- 2-year baseline (item + vendor) ---------------- */
 OUTER APPLY (
     SELECT SUM(ld.quantity * ld.[Unit Cost]) /
            NULLIF(SUM(ld.quantity),0) AS avg_price_vendor
@@ -342,7 +339,6 @@ OUTER APPLY (
       AND  hd.[Order Date] BETWEEN DATEADD(day,-@w2y,h.[Order Date]) AND h.[Order Date]-1
 ) AS b2y_v
 
-/* ---------- Most-recent prior purchase (any vendor) -------- */
 OUTER APPLY (
     SELECT TOP 1
            ld.[Unit Cost] AS last_unit_cost,
@@ -350,7 +346,7 @@ OUTER APPLY (
                 ELSE v_prev.[Country_Region Code] END AS last_vendor_country
     FROM   #LineData  ld
     JOIN   #HeaderData hd ON ld.[Document No_] = hd.[Doc_No_]
-    LEFT JOIN [dbo].[IPG Photonics Corporation$Vendor] v_prev
+    LEFT JOIN [dbo].[IPG Canada$Vendor] v_prev
            ON ld.[Buy-from Vendor No_] = v_prev.[No_]
     WHERE  ld.[Type]='Item'
       AND  ld.[No_]  = l.[No_]
@@ -360,7 +356,6 @@ OUTER APPLY (
              ld.[Line No_] DESC
 ) AS last
 
-/* ---------- Most-recent prior purchase (same vendor) ------- */
 OUTER APPLY (
     SELECT TOP 1 ld.[Unit Cost] AS last_unit_cost_vendor
     FROM   #LineData  ld
@@ -374,7 +369,6 @@ OUTER APPLY (
              ld.[Line No_] DESC
 ) AS last_v
 
-/* ---------- Single-source count (up to order date) --------- */
 OUTER APPLY (
     SELECT COUNT(DISTINCT ld.[Buy-from Vendor No_]) AS vendor_cnt
     FROM   #LineData ld
@@ -384,7 +378,6 @@ OUTER APPLY (
       AND  hd2.[Order Date] <= h.[Order Date]
 ) AS ss
 
-/* ---------- High-volume PO & spend (rolling year) ---------- */
 OUTER APPLY (
     SELECT COUNT(DISTINCT hd3.[Doc_No_])                AS po_cnt,
            SUM(ld3.quantity * ld3.[Unit Cost])          AS spend_amt
@@ -395,10 +388,8 @@ OUTER APPLY (
       AND  hd3.[Order Date] BETWEEN DATEADD(day,-@hv_window,h.[Order Date]) AND h.[Order Date]-1
 ) AS hv
 
-/* ---------- Adaptive baselines (item & vendor) ------------- */
 OUTER APPLY (
     SELECT
-        -- Item baseline: 1y → 2y → last-item → row price
         CASE
             WHEN b1y.avg_price       IS NOT NULL THEN b1y.avg_price
             WHEN b2y.avg_price       IS NOT NULL THEN b2y.avg_price
@@ -406,7 +397,6 @@ OUTER APPLY (
             ELSE l.[Unit Cost]
         END AS baseline_unit_cost,
 
-        -- Vendor baseline: 1y → 2y → last-vendor → item baseline
         CASE
             WHEN b1y_v.avg_price_vendor      IS NOT NULL THEN b1y_v.avg_price_vendor
             WHEN b2y_v.avg_price_vendor      IS NOT NULL THEN b2y_v.avg_price_vendor
@@ -425,5 +415,5 @@ LEFT JOIN #Receipts AS r
        ON l.[Document No_] = r.order_no
       AND l.[Line No_]     = r.line_no
       AND l.[No_]          = r.item_no
-LEFT JOIN [dbo].[IPG Photonics Corporation$Vendor] AS v
+LEFT JOIN [dbo].[IPG Canada$Vendor] AS v
        ON l.[Buy-from Vendor No_] = v.[No_];
