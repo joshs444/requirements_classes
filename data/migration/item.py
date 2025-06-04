@@ -1,39 +1,39 @@
 #!/usr/bin/env python3
 """
-migrate_ledger.py
+migrate_item.py  –  v1.0  (04 Jun 2025)
 ────────────────────────────────────────────────────────────────────────────
-Pull data defined in sql/item/item.sql from the SQL-Server data-warehouse
-(IPG-DW-PROTOTYPE) and push it into the `item` table of your local
-MySQL schema `my_project_db`.
+Streams the “item master + purchasing intelligence” query from SQL-Server
+into MySQL with:
 
-Project layout expected:
-
-project_root/
-├── data_access/
-│   └── nav_database.py       ← defines get_engine(), load_and_process_table()
-├── sql/
-│   └── item/
-│       └── item.sql          ← the SELECT … query to run on SQL Server
-└── data/
-    └── migration/
-        └── migrate_ledger.py ← this script (any folder is fine)
+• Streaming fetches (20 000-row windows) → low memory use
+• Safe executemany inserts (1 000 rows)  → avoids MySQL’s 65 535-parameter cap
+• Oversize-proof column widths (generous VARCHAR / DECIMAL / DATE)
+• Ctrl-C friendly with clear MySQL /DataError surfacing
 """
+from __future__ import annotations
 
-# ── Standard library ──────────────────────────────────────────────────────
-from pathlib import Path
 import logging
+import sys
+from pathlib import Path
+from typing import Dict
 
-# ── Third-party ───────────────────────────────────────────────────────────
 import pandas as pd
 from sqlalchemy import create_engine
+from sqlalchemy.engine import Engine
+from sqlalchemy.exc import DataError
+from sqlalchemy.types import (
+    CHAR,
+    DATE,
+    DECIMAL,
+    INTEGER,
+    SMALLINT,
+    VARCHAR,
+)
 
-# ── Internal imports (source-side helpers) ────────────────────────────────
 from data_access.nav_database import get_engine as get_src_engine
-from data_access.nav_database import load_and_process_table
 
-# ──────────────────────────────────────────────────────────────────────────
-# TARGET-SIDE (MySQL) CONNECTION DETAILS
-# ──────────────────────────────────────────────────────────────────────────
+
+# ──────────── MySQL connection (edit if needed) ───────────────────────────
 MYSQL_HOST = "127.0.0.1"
 MYSQL_PORT = 3306
 MYSQL_USER = "root"
@@ -43,71 +43,132 @@ CHARSET    = "utf8mb4"
 
 MYSQL_URL = (
     f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASS}"
-    f"@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DB}"
-    f"?charset={CHARSET}"
+    f"@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DB}?charset={CHARSET}"
 )
 
-# ──────────────────────────────────────────────────────────────────────────
-# PATH TO THE SQL FILE YOU WANT TO RUN ON SQL SERVER
-# ──────────────────────────────────────────────────────────────────────────
-PROJECT_ROOT = Path(__file__).resolve().parents[2]   # climb two levels
-SQL_FILE     = PROJECT_ROOT / "sql" / "item" / "item.sql"
+TARGET_TABLE = "item"                       # ← final table in MySQL
 
+# ──────────── chunk & file settings ───────────────────────────────────────
+CHUNK_ROWS  = 20_000          # rows fetched from SQL-Server in one window
+WRITE_CHUNK = 1_000           # rows per executemany() batch into MySQL
 
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+SQL_FILE     = PROJECT_ROOT / "sql" / "item" / "item_us.sql"
+
+# ──────────── explicit dtype map (safe, slightly oversized) ───────────────
+dtype_map: Dict[str, object] = {
+    "row_index":                INTEGER(),          # ROW_NUMBER()
+    "item_no":                  VARCHAR(30),
+    "Description":              VARCHAR(255),
+    "inventory_posting_group":  VARCHAR(50),
+    "unit_cost":                DECIMAL(18, 6),
+
+    "lead_time_calculation":    VARCHAR(20),
+    "global_dimension_1_code":  VARCHAR(50),
+    "replenishment_system":     VARCHAR(20),
+    "revision_no":              SMALLINT(),
+
+    "item_source":              VARCHAR(30),
+    "common_item_no":           VARCHAR(30),
+    "hts":                      VARCHAR(20),
+
+    "item_category_code":       VARCHAR(20),
+    "parent_category_code":     VARCHAR(20),
+    "item_category_description":VARCHAR(100),
+
+    "last_9m_output_qty":       DECIMAL(18, 4),
+    "last_9m_purchase_qty":     DECIMAL(18, 4),
+    "open_purchase_qty":        DECIMAL(18, 4),
+
+    "make_buy":                 VARCHAR(15),
+
+    "last_vendor_name":         VARCHAR(255),
+    "last_vendor_country":      CHAR(2),
+    "last_purchase_qty":        DECIMAL(18, 4),
+    "last_unit_cost":           DECIMAL(18, 6),
+    "last_order_date":          DATE(),
+    "last_mfg_part_no":         VARCHAR(60),
+
+    "raw_mat_flag":             CHAR(3),
+    "item_index":               VARCHAR(40),
+}
+
+# ───────────────────────────────────────────────────────────────────────────
 def read_sql_file(path: Path) -> str:
-    """Return the contents of a .sql file as a string."""
+    """Load the .sql file into memory (UTF-8)."""
     return path.read_text(encoding="utf-8")
 
 
+def stream_and_write_chunks(
+    src_engine: Engine,
+    tgt_engine: Engine,
+    query: str,
+) -> int:
+    """Stream rows from SQL-Server and insert into MySQL in safe batches."""
+    total_rows  = 0
+    first_chunk = True
+
+    try:
+        for chunk in pd.read_sql_query(
+            sql=query,
+            con=src_engine.execution_options(stream_results=True),
+            chunksize=CHUNK_ROWS,
+        ):
+            with tgt_engine.begin() as conn:      # one MySQL TXN per chunk
+                conn.exec_driver_sql("SET foreign_key_checks = 0;")
+
+                try:
+                    chunk.to_sql(
+                        name=TARGET_TABLE,
+                        con=conn,
+                        if_exists="replace" if first_chunk else "append",
+                        index=False,
+                        chunksize=WRITE_CHUNK,
+                        dtype=dtype_map,
+                    )
+                except DataError:
+                    logging.exception(
+                        "MySQL DataError while inserting chunk starting at row %s",
+                        f"{total_rows:,}"
+                    )
+                    raise
+
+                conn.exec_driver_sql("SET foreign_key_checks = 1;")
+
+            first_chunk = False
+            total_rows += len(chunk)
+            logging.info("… processed %s rows so far", f"{total_rows:,}")
+
+    except KeyboardInterrupt:
+        logging.warning("Migration aborted by user (%s rows written).", f"{total_rows:,}")
+        return total_rows
+
+    return total_rows
+
+
 def main() -> None:
-    # ── Logging setup ────────────────────────────────────────────────────
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s  %(levelname)-8s %(message)s",
     )
 
-    # ── Load and validate SQL file ───────────────────────────────────────
     if not SQL_FILE.exists():
         logging.error("SQL file not found: %s", SQL_FILE)
-        return
+        sys.exit(1)
+
     item_sql = read_sql_file(SQL_FILE)
     logging.info("Loaded SQL from %s", SQL_FILE)
 
-    # ── Pull data from SQL Server ────────────────────────────────────────
-    src_engine = get_src_engine()  # from nav_database.py
-    df: pd.DataFrame = load_and_process_table(
-        query=item_sql,
-        engine=src_engine,
-        rename_cols=None,
-        additional_processing=None,
-    )
-    if df is None or df.empty:
-        logging.error("No rows returned from source query. Aborting.")
-        return
-    logging.info("Pulled %s rows.", len(df))
-
-    # ── Push data into MySQL in one txn & conn ───────────────────────────
+    src_engine = get_src_engine()
     tgt_engine = create_engine(MYSQL_URL, pool_pre_ping=True)
 
-    with tgt_engine.connect() as conn:
-        with conn.begin():
-            # disable FKs for this transaction
-            conn.exec_driver_sql("SET FOREIGN_KEY_CHECKS = 0;")
+    logging.info("Starting streaming migration…")
+    rows = stream_and_write_chunks(src_engine, tgt_engine, item_sql)
 
-            logging.info("Writing to MySQL table `item` …")
-            df.to_sql(
-                name="item",
-                con=conn,             # reuse this connection
-                if_exists="replace",  # use 'append' to keep existing data
-                index=False,
-                chunksize=10_000,
-                method="multi"
-            )
-
-            # re-enable FKs
-            conn.exec_driver_sql("SET FOREIGN_KEY_CHECKS = 1;")
-
-    logging.info("✓ Migration complete.")
+    if rows == 0:
+        logging.error("No rows processed.")
+    else:
+        logging.info("✓ Migration complete (%s rows).", f"{rows:,}")
 
 
 if __name__ == "__main__":

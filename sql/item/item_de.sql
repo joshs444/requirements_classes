@@ -167,26 +167,26 @@ WITH base AS (
         COALESCE(op.open_purchase_qty,    0)      AS open_purchase_qty,
         /* replenishment decision */
         CASE
-            WHEN COALESCE(op.open_purchase_qty,0) > 0 THEN 'Purchase'
+            WHEN COALESCE(op.open_purchase_qty,0) > 0 THEN 'Buy'
             ELSE
                 CASE
-                    WHEN it.[Item Source] = 3 THEN 'Output'
-                    WHEN it.[Item Source] IN (1,2) THEN 'Purchase'
-                    WHEN it.[Replenishment System] IN (1,2) THEN 'Output'
-                    WHEN it.[Replenishment System] = 0 THEN 'Purchase'
+                    WHEN it.[Item Source] = 3 THEN 'Make'
+                    WHEN it.[Item Source] IN (1,2) THEN 'Buy'
+                    WHEN it.[Replenishment System] IN (1,2) THEN 'Make'
+                    WHEN it.[Replenishment System] = 0 THEN 'Buy'
                     ELSE 'Unknown'
                 END
                 + CASE
                     WHEN COALESCE(ls.last_9m_output_qty,0) > COALESCE(ls.last_9m_purchase_qty,0)
                          AND it.[Item Source] <> 3
                          AND it.[Replenishment System] = 0
-                         THEN '→Output'
+                         THEN '→Make'
                     WHEN COALESCE(ls.last_9m_purchase_qty,0) > COALESCE(ls.last_9m_output_qty,0)
                          AND (it.[Item Source] = 3 OR it.[Replenishment System] IN (1,2))
-                         THEN '→Purchase'
+                         THEN '→Buy'
                     ELSE ''
                   END
-        END                                       AS purchase_output
+        END                                       AS make_buy
     FROM #Items it
     LEFT JOIN #Ledger9m ls ON it.item_no = ls.item_no
     LEFT JOIN #OpenPO  op ON it.item_no = op.item_no
@@ -202,7 +202,7 @@ SELECT
     /* raw-material flag */
     CASE
          WHEN base.inventory_posting_group = 'FIN GOODS'                    THEN 'No'
-         WHEN base.purchase_output = 'Purchase'
+         WHEN base.make_buy = 'Buy'
               AND base.last_9m_output_qty = 0                               THEN 'Yes'
          ELSE 'No'
     END                                         AS raw_mat_flag,

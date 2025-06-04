@@ -1,116 +1,127 @@
 /*************************************************************************************************
-  Procurement Analytics –  DE010  (IPG Laser GmbH)
-  v8.3-DE-5  · adds item_index and fixes collation + OpenLines alias
-  • identical business logic to US010; no Manufacturer fields, no Order-Confirmation-Date
+  Procurement Analytics – DE010 (IPG Laser GmbH)  
+  v8.3‑DE‑10  (May 2025)   · column aliases normalised to lower_snake_case
 *************************************************************************************************/
+SET NOCOUNT ON;
 
 /* ============================================================ 0. Parameters */
 DECLARE
-    @w1y       INT   = 365,      -- 1-year look-back
-    @w2y       INT   = 730,      -- 2-year look-back
-    @hv_po     INT   = 12,       -- high-volume PO threshold (count)
-    @hv_spend  MONEY = 100000,   -- high-volume spend threshold ($)
-    @hv_window INT   = 365;      -- window (days) for hv flags
-SET NOCOUNT ON;
+    @w1y       INT   = 365 ,
+    @w2y       INT   = 730 ,
+    @hv_po     INT   = 12  ,
+    @hv_spend  MONEY = 100000,
+    @hv_window INT   = 365 ;
 
-/* ============================================================ 1. #LineData  (history + open) */
+/* ============================================================ 1.  #LineData  (history + open) */
 IF OBJECT_ID('tempdb..#LineData') IS NOT NULL DROP TABLE #LineData;
 
 ;WITH
-LatestArchive AS (   -- newest version of each archived line
+LatestArchive AS (
     SELECT *
     FROM (
         SELECT  l.*,
-                ROW_NUMBER() OVER (PARTITION BY l.[Document No_],l.[Line No_]
+                ROW_NUMBER() OVER (PARTITION BY l.[Document No_], l.[Line No_]
                                    ORDER BY l.[Version No_] DESC) AS rn
         FROM    [dbo].[IPG Laser GmbH$Purchase Line Archive] l
-        WHERE   l.[Order Date]      > '2019-01-01'
-          AND   l.[Document Type]   = 1
-          AND   l.[Type]           IN (1,2,4)
-          AND   l.[Quantity]        > 0
-          AND   l.[Unit Cost (LCY)] > 0
-    ) a
-    WHERE rn = 1
+        WHERE   l.[Document Type] = 1
+          AND   l.[Type]        IN (1,2,4,5)
+          AND   l.[Quantity]      > 0
+          AND   l.[Order Date]    > '2019‑12‑31'
+    ) x WHERE rn = 1
 ),
 HistoryLines AS (
     SELECT
-        'HISTORY'                                         AS [Status],
-        l.[Document Type],  l.[Document No_], l.[Line No_],
-        l.[Shortcut Dimension 1 Code], l.[Buy-from Vendor No_],
-        CASE l.[Type] WHEN 1 THEN 'GL'
-                      WHEN 2 THEN 'Item'
-                      WHEN 4 THEN 'FA' END                AS [Type],
-        l.[No_], l.[Location Code],
-        l.[Expected Receipt Date], l.[Promised Receipt Date],
-        l.[Planned Receipt Date],  l.[Description],
+        'HISTORY'                                         AS status,
+        l.[Document Type]                                 AS document_type,
+        l.[Document No_]                                  AS document_no,
+        l.[Line No_]                                      AS line_no,
+        l.[Shortcut Dimension 1 Code]                     AS cost_center,
+        l.[Buy-from Vendor No_]                           AS buy_from_vendor_no,
+        l.[Type]                                          AS type_numeric,
+        l.[No_]                                           AS item_no,
+        l.[Location Code]                                 AS location_code,
+        l.[Requested Receipt Date]                        AS expected_receipt_date,
+        l.[Promised Receipt Date]                         AS promised_receipt_date,
+        l.[Planned Receipt Date]                          AS planned_receipt_date,
+        l.[Description]                                   AS description,
         COALESCE(NULLIF(l.[Qty_ per Unit of Measure],0),1) AS qty_factor,
-        l.[Quantity]             AS OrigQuantity,
-        l.[Outstanding Quantity] AS OrigOutstandingQty,
-        l.[Unit Cost (LCY)]      AS OrigUnitCost,
-        l.[Requested Receipt Date]
+        l.[Quantity]               AS orig_quantity,
+        l.[Outstanding Quantity]   AS orig_outstanding_qty,
+        l.[Unit Cost (LCY)]        AS orig_unit_cost,
+        l.[Requested Receipt Date] AS requested_receipt_date
     FROM LatestArchive l
-    WHERE l.[Quantity] - l.[Outstanding Quantity] <> 0
 ),
-OpenLines AS (        -- ← alias added on first column
+OpenLines AS (
     SELECT
-        'OPEN'                                           AS [Status],
-        pl.[Document Type], pl.[Document No_], pl.[Line No_],
-        pl.[Shortcut Dimension 1 Code], pl.[Buy-from Vendor No_],
-        CASE pl.[Type] WHEN 1 THEN 'GL'
-                       WHEN 2 THEN 'Item'
-                       WHEN 4 THEN 'FA' END               AS [Type],
-        pl.[No_], pl.[Location Code],
-        pl.[Expected Receipt Date], pl.[Promised Receipt Date],
-        pl.[Planned Receipt Date],  pl.[Description],
+        'OPEN'                                            AS status,
+        pl.[Document Type]                                AS document_type,
+        pl.[Document No_]                                 AS document_no,
+        pl.[Line No_]                                     AS line_no,
+        pl.[Shortcut Dimension 1 Code]                    AS cost_center,
+        pl.[Buy-from Vendor No_]                          AS buy_from_vendor_no,
+        pl.[Type]                                         AS type_numeric,
+        pl.[No_]                                          AS item_no,
+        pl.[Location Code]                                AS location_code,
+        pl.[Expected Receipt Date]                        AS expected_receipt_date,
+        pl.[Promised Receipt Date]                        AS promised_receipt_date,
+        pl.[Planned Receipt Date]                         AS planned_receipt_date,
+        pl.[Description]                                  AS description,
         COALESCE(NULLIF(pl.[Qty_ per Unit of Measure],0),1) AS qty_factor,
-        pl.[Quantity]             AS OrigQuantity,
-        pl.[Outstanding Quantity] AS OrigOutstandingQty,
-        pl.[Unit Cost (LCY)]      AS OrigUnitCost,
-        pl.[Requested Receipt Date]
+        pl.[Quantity]               AS orig_quantity,
+        pl.[Outstanding Quantity]   AS orig_outstanding_qty,
+        pl.[Unit Cost (LCY)]        AS orig_unit_cost,
+        pl.[Requested Receipt Date] AS requested_receipt_date
     FROM [dbo].[IPG Laser GmbH$Purchase Line] pl
-    WHERE pl.[Order Date] > '2019-01-01'
-      AND pl.[Document Type] = 1
-      AND pl.[Type] IN (1,2,4)
-      AND pl.[Quantity] > 0
-      AND pl.[Unit Cost (LCY)] > 0
+    WHERE pl.[Document Type] = 1
+      AND pl.[Type]        IN (1,2,4,5)
+      AND pl.[Quantity]      > 0
 )
 SELECT
-    s.[Status], s.[Document Type], s.[Document No_], s.[Line No_],
-    s.[Shortcut Dimension 1 Code], s.[Buy-from Vendor No_], s.[Type], s.[No_],
-    s.[Location Code], s.[Expected Receipt Date], s.[Promised Receipt Date],
-    s.[Planned Receipt Date], s.[Description],
-    s.qty_factor                               AS [Qty_ per Unit of Measure],
-    s.OrigQuantity      * s.qty_factor         AS [Quantity],
-    s.OrigOutstandingQty* s.qty_factor         AS [Outstanding Quantity],
-    s.OrigUnitCost      / s.qty_factor         AS [Unit Cost],
-    s.[Requested Receipt Date],
-    (s.OrigQuantity - s.OrigOutstandingQty)
-        * (s.OrigUnitCost / s.qty_factor)      AS [Total],
-    (s.OrigQuantity - s.OrigOutstandingQty)
-        * s.qty_factor                         AS [Quantity Delivered],
-    'DE010'                                    AS [Subsidiary]
+    s.status,
+    s.document_type,
+    s.document_no,
+    s.line_no,
+    s.cost_center,
+    s.buy_from_vendor_no,
+    s.type_numeric,
+    s.item_no,
+    s.location_code,
+    s.expected_receipt_date,
+    s.promised_receipt_date,
+    s.planned_receipt_date,
+    s.description,
+    s.qty_factor                              AS qty_per_unit_of_measure,
+    s.orig_quantity      * s.qty_factor       AS quantity,
+    s.orig_outstanding_qty* s.qty_factor      AS outstanding_quantity,
+    s.orig_unit_cost      / s.qty_factor      AS unit_cost,
+    s.requested_receipt_date,
+    CAST(NULL AS nvarchar(50))                AS manufacturer_part_no,
+    CAST(NULL AS nvarchar(50))                AS manufacturer_code,
+    (s.orig_quantity - s.orig_outstanding_qty)
+        * (s.orig_unit_cost / s.qty_factor)   AS total,
+    (s.orig_quantity - s.orig_outstanding_qty)
+        * s.qty_factor                        AS quantity_delivered,
+    'DE010'                                   AS subsidiary
 INTO #LineData
 FROM (SELECT * FROM HistoryLines UNION ALL SELECT * FROM OpenLines) s;
 
-CREATE CLUSTERED INDEX IX_LineData_DocLineItem
-    ON #LineData([Document No_], [Line No_], [No_]);
+CREATE CLUSTERED INDEX IX_LineData ON #LineData(document_no,line_no,item_no);
 
-/* ============================================================ 2. #HeaderData (deduplicated) */
+/* ============================================================ 2.  #HeaderData  */
 IF OBJECT_ID('tempdb..#HeaderData') IS NOT NULL DROP TABLE #HeaderData;
 
-;WITH AllHeaders AS (
+;WITH
+AllHeaders AS (
     SELECT  h.[Document Type], h.[No_], h.[Order Date], h.[Posting Date],
             h.[Purchaser Code], h.[Buy-from Vendor No_]
     FROM    [dbo].[IPG Laser GmbH$Purchase Header] h
-    WHERE   h.[Order Date] > '2018-12-31'
-      AND   h.[Document Type] = 1
+    WHERE   h.[Document Type] = 1
       AND   h.[Buy-from Vendor No_] <> ''
     UNION ALL
     SELECT  ah.[Document Type], ah.[No_], ah.[Order Date], ah.[Posting Date],
             ah.[Purchaser Code], ah.[Buy-from Vendor No_]
     FROM    [dbo].[IPG Laser GmbH$Purchase Header Archive] ah
-    WHERE   ah.[Order Date] > '2018-12-31'
-      AND   ah.[Document Type] = 1
+    WHERE   ah.[Document Type] = 1
       AND   ah.[Buy-from Vendor No_] <> ''
 ),
 LatestHeader AS (
@@ -118,23 +129,23 @@ LatestHeader AS (
     FROM   AllHeaders
 )
 SELECT
-    h.[Document Type],
-    h.[No_]                      AS [Doc_No_],
-    h.[Order Date],
-    h.[Posting Date],
-    v.[Strategic Purchaser Code] AS [Assigned User ID],
-    h.[Purchaser Code],
-    'DE010'                      AS [Subsidiary]
+    h.[Document Type]         AS document_type,
+    h.[No_]                   AS doc_no,
+    h.[Order Date]            AS order_date,
+    h.[Posting Date]          AS posting_date,
+    v.[Strategic Purchaser Code] AS assigned_user_id,
+    CAST(NULL AS date)        AS order_confirmation_date,
+    h.[Purchaser Code]        AS purchaser_code,
+    'DE010'                   AS subsidiary
 INTO #HeaderData
-FROM   LatestHeader h
-LEFT   JOIN [dbo].[IPG Laser GmbH$Vendor] v
+FROM LatestHeader h
+LEFT JOIN [dbo].[IPG Laser GmbH$Vendor] v
        ON h.[Buy-from Vendor No_] = v.[No_]
-WHERE  h.rn = 1;
+WHERE h.rn = 1;
 
-CREATE UNIQUE CLUSTERED INDEX IX_HeaderData_Doc
-    ON #HeaderData([Doc_No_]);
+CREATE UNIQUE CLUSTERED INDEX IX_HeaderData ON #HeaderData(doc_no);
 
-/* ============================================================ 3. #Receipts */
+/* ============================================================ 3.  #Receipts */
 IF OBJECT_ID('tempdb..#Receipts') IS NOT NULL DROP TABLE #Receipts;
 
 SELECT
@@ -145,229 +156,232 @@ SELECT
 INTO #Receipts
 FROM [dbo].[IPG Laser GmbH$Purch_ Rcpt_ Line]
 WHERE [Quantity] > 0
-  AND [Posting Date] > '2017-12-31'
 GROUP BY [Line No_], [Order No_], [No_];
 
-CREATE UNIQUE CLUSTERED INDEX IX_Receipts_OrderLineItem
-    ON #Receipts(order_no, line_no, item_no);
+CREATE UNIQUE CLUSTERED INDEX IX_Receipts ON #Receipts(order_no,line_no,item_no);
 
-/* ============================================================ 4. Final SELECT – KPIs, baselines, flags */
+/* ============================================================ 4.  Final SELECT */
 SELECT
-    h.[Order Date]                           AS order_date,
-    l.[Status], l.[Document Type], l.[Document No_], l.[Line No_],
-    l.[Buy-from Vendor No_], v.[Name]        AS vendor_name,
-    CASE WHEN v.[Country_Region Code]='HK' THEN 'CN' ELSE v.[Country_Region Code] END AS vendor_country,
-    v.[Vendor Posting Group],
-    l.[Type], l.[No_]                        AS item_no,
-    l.[Shortcut Dimension 1 Code]            AS cost_center,
-    l.[Location Code],
-    l.[Expected Receipt Date], l.[Promised Receipt Date], r.posting_date,
-    l.[Qty_ per Unit of Measure], l.[Quantity], l.[Outstanding Quantity], l.[Unit Cost],
+    /* ---------- Order date FIRST --------------------------- */
+    h.order_date,
 
-    CASE WHEN l.[Qty_ per Unit of Measure] IS NULL               THEN 'NULL'
-         WHEN l.[Qty_ per Unit of Measure] <= 0                  THEN 'BAD'
-         WHEN l.[Qty_ per Unit of Measure] BETWEEN 0.01 AND 100  THEN 'OK'
-         ELSE 'CHECK' END                   AS uom_sanity_flag,
+    /* ---------- IDs & dimensions --------------------------- */
+    l.status,
+    l.document_type,
+    l.document_no,
+    l.line_no,
+    l.buy_from_vendor_no,
+    v.[Name]                       AS vendor_name,
+    CASE WHEN v.[Country_Region Code]='HK' THEN 'CN'
+         ELSE v.[Country_Region Code] END   AS vendor_country,
+    v.[Vendor Posting Group]        AS vendor_posting_group,
 
-    ISNULL(b1y.avg_price, l.[Unit Cost])            AS avg_price_1y,
-    ISNULL(b2y.avg_price, l.[Unit Cost])            AS avg_price_2y,
-    ISNULL(b1y_v.avg_price_vendor, l.[Unit Cost])   AS avg_price_1y_vendor,
-    ISNULL(b2y_v.avg_price_vendor, l.[Unit Cost])   AS avg_price_2y_vendor,
+    /* map type codes */
+    CASE l.type_numeric
+         WHEN 1 THEN 'GL'
+         WHEN 2 THEN 'Item'
+         WHEN 4 THEN 'FA'
+         ELSE CAST(l.type_numeric AS varchar(3))
+    END                             AS type,
 
-    bl.baseline_unit_cost, bl.baseline_unit_cost_vendor,
+    l.item_no,
+    l.cost_center,
+    l.location_code,
 
-    (l.[Unit Cost] - bl.baseline_unit_cost)
-         / NULLIF(bl.baseline_unit_cost, l.[Unit Cost])          AS price_var_pct,
-    CASE WHEN l.[Unit Cost] < bl.baseline_unit_cost
-         THEN (bl.baseline_unit_cost - l.[Unit Cost]) * l.[Quantity] ELSE 0 END AS savings_value,
+    /* ---------- Dates, quantity, cost ---------------------- */
+    l.expected_receipt_date,
+    l.promised_receipt_date,
+    r.posting_date,
+    l.qty_per_unit_of_measure,
+    l.quantity,
+    l.outstanding_quantity,
+    l.unit_cost,
 
-    (l.[Unit Cost] - bl.baseline_unit_cost_vendor)
-         / NULLIF(bl.baseline_unit_cost_vendor, l.[Unit Cost])   AS price_var_pct_vendor,
-    CASE WHEN l.[Unit Cost] < bl.baseline_unit_cost_vendor
-         THEN (bl.baseline_unit_cost_vendor - l.[Unit Cost]) * l.[Quantity] ELSE 0 END AS savings_value_vendor,
+    /* ---------- UOM sanity flag ---------------------------- */
+    CASE
+        WHEN l.qty_per_unit_of_measure IS NULL              THEN 'null'
+        WHEN l.qty_per_unit_of_measure <= 0                 THEN 'bad'
+        WHEN l.qty_per_unit_of_measure BETWEEN 0.01 AND 100 THEN 'ok'
+        ELSE 'check'
+    END                             AS uom_sanity_flag,
 
-    CASE WHEN ss.vendor_cnt = 1 THEN 'Yes' ELSE 'No' END          AS single_source_flag,
-    CASE WHEN hv.po_cnt    >= @hv_po    THEN 'Yes' ELSE 'No' END  AS high_volume_po_flag,
-    CASE WHEN hv.spend_amt >= @hv_spend THEN 'Yes' ELSE 'No' END  AS high_volume_spend_flag,
+    /* ---------- Raw baselines ------------------------------ */
+    ISNULL(b1y.avg_price,      l.unit_cost)   AS avg_price_1y,
+    ISNULL(b2y.avg_price,      l.unit_cost)   AS avg_price_2y,
+    ISNULL(b1y_v.avg_price_vendor,l.unit_cost)AS avg_price_1y_vendor,
+    ISNULL(b2y_v.avg_price_vendor,l.unit_cost)AS avg_price_2y_vendor,
 
-    DATEDIFF(day, l.[Promised Receipt Date], r.posting_date)      AS days_late_early,
+    /* ---------- Adaptive baselines ------------------------- */
+    bl.baseline_unit_cost,
+    bl.baseline_unit_cost_vendor,
+
+    /* ---------- Variance & savings ------------------------- */
+    (l.unit_cost - bl.baseline_unit_cost)
+        / NULLIF(bl.baseline_unit_cost,0)     AS price_var_pct,
+    CASE
+        WHEN bl.baseline_unit_cost = 0
+             OR l.unit_cost >= bl.baseline_unit_cost
+        THEN 0
+        ELSE (bl.baseline_unit_cost - l.unit_cost) * l.quantity
+    END                                         AS savings_value,
+
+    (l.unit_cost - bl.baseline_unit_cost_vendor)
+        / NULLIF(bl.baseline_unit_cost_vendor,0)AS price_var_pct_vendor,
+    CASE
+        WHEN bl.baseline_unit_cost_vendor = 0
+             OR l.unit_cost >= bl.baseline_unit_cost_vendor
+        THEN 0
+        ELSE (bl.baseline_unit_cost_vendor - l.unit_cost) * l.quantity
+    END                                         AS savings_value_vendor,
+
+    /* ---------- Risk flags --------------------------------- */
+    CASE WHEN ss.vendor_cnt = 1 THEN 'yes' ELSE 'no' END    AS single_source_flag,
+    CASE WHEN hv.po_cnt    >= @hv_po    THEN 'yes' ELSE 'no' END AS high_volume_po_flag,
+    CASE WHEN hv.spend_amt >= @hv_spend THEN 'yes' ELSE 'no' END AS high_volume_spend_flag,
+
+    /* ---------- Delivery metrics --------------------------- */
+    DATEDIFF(day,l.promised_receipt_date,r.posting_date)      AS days_late_early,
     (
-         DATEDIFF(day, l.[Promised Receipt Date], r.posting_date)
-       - DATEDIFF(week,l.[Promised Receipt Date], r.posting_date)*2
-       - CASE WHEN DATENAME(weekday,l.[Promised Receipt Date]) IN ('Saturday','Sunday') THEN 1 ELSE 0 END
-       - CASE WHEN DATENAME(weekday,r.posting_date)            IN ('Saturday','Sunday') THEN 1 ELSE 0 END
-    )                                                             AS bus_days_late,
-    CASE WHEN r.posting_date IS NULL THEN NULL
-         WHEN (
-             DATEDIFF(day, l.[Promised Receipt Date], r.posting_date)
-           - DATEDIFF(week,l.[Promised Receipt Date], r.posting_date)*2
-           - CASE WHEN DATENAME(weekday,l.[Promised Receipt Date]) IN ('Saturday','Sunday') THEN 1 ELSE 0 END
-           - CASE WHEN DATENAME(weekday,r.posting_date)            IN ('Saturday','Sunday') THEN 1 ELSE 0 END
-         ) > 3 THEN 0 ELSE 1 END                                  AS on_time_flag,
+         DATEDIFF(day,l.promised_receipt_date,r.posting_date)
+       - DATEDIFF(week,l.promised_receipt_date,r.posting_date)*2
+       - CASE WHEN DATENAME(weekday,l.promised_receipt_date) IN ('Saturday','Sunday') THEN 1 ELSE 0 END
+       - CASE WHEN DATENAME(weekday,r.posting_date)          IN ('Saturday','Sunday') THEN 1 ELSE 0 END
+    )                                                        AS bus_days_late,
+    CASE
+        WHEN r.posting_date IS NULL THEN NULL
+        WHEN (
+             DATEDIFF(day,l.promised_receipt_date,r.posting_date)
+           - DATEDIFF(week,l.promised_receipt_date,r.posting_date)*2
+           - CASE WHEN DATENAME(weekday,l.promised_receipt_date) IN ('Saturday','Sunday') THEN 1 ELSE 0 END
+           - CASE WHEN DATENAME(weekday,r.posting_date)          IN ('Saturday','Sunday') THEN 1 ELSE 0 END
+         ) > 3 THEN 0 ELSE 1
+    END                                         AS on_time_flag,
 
-    ISNULL(last.last_unit_cost, l.[Unit Cost])                    AS last_unit_cost,
-    CASE WHEN l.[Type]='Item' AND last.last_unit_cost IS NULL THEN 'Yes' ELSE 'No' END AS first_purchase,
-    CASE WHEN l.[Type]<>'Item' OR last.last_unit_cost IS NULL THEN 'No'
+    /* ---------- Purchase‑history intelligence -------------- */
+    ISNULL(last.last_unit_cost,l.unit_cost)     AS last_unit_cost,
+    CASE WHEN l.type_numeric=2 AND last.last_unit_cost IS NULL
+         THEN 'yes' ELSE 'no' END               AS first_purchase,
+    CASE
+         WHEN l.type_numeric<>2 OR last.last_unit_cost IS NULL THEN 'no'
          WHEN last.last_vendor_country <>
-              CASE WHEN v.[Country_Region Code]='HK' THEN 'CN' ELSE v.[Country_Region Code] END
-              THEN 'Yes' ELSE 'No' END                            AS country_change,
-    CASE WHEN l.[Type]<>'Item' OR last.last_unit_cost IS NULL THEN 'No'
-         WHEN last.last_vendor_country='CN' THEN 'Yes' ELSE 'No' END AS china_change,
+              CASE WHEN v.[Country_Region Code]='HK' THEN 'CN'
+                   ELSE v.[Country_Region Code] END
+              THEN 'yes' ELSE 'no'
+    END                                         AS country_change,
+    CASE
+         WHEN l.type_numeric<>2 OR last.last_unit_cost IS NULL THEN 'no'
+         WHEN last.last_vendor_country='CN'                      THEN 'yes' ELSE 'no'
+    END                                         AS china_change,
 
-    l.[Description], l.[Requested Receipt Date], l.[Total],
-    l.[Planned Receipt Date], l.[Quantity Delivered],
-    DATEDIFF(day, h.[Order Date], l.[Promised Receipt Date])      AS promised_lead_time_days,
-    DATEDIFF(day, h.[Order Date], r.posting_date)                 AS actual_lead_time_days,
-    h.[Assigned User ID]                                          AS assigned_user_id,
-    h.[Purchaser Code]                                            AS purchaser_code,
-    l.[Subsidiary]                                                AS subsidiary,
+    /* ---------- Misc original columns ---------------------- */
+    l.description,
+    l.requested_receipt_date,
+    l.manufacturer_part_no,
+    l.manufacturer_code,
+    l.total,
+    l.planned_receipt_date,
+    l.quantity_delivered,
+    DATEDIFF(day,h.order_date,l.promised_receipt_date)        AS promised_lead_time_days,
+    DATEDIFF(day,h.order_date,r.posting_date)                 AS actual_lead_time_days,
+    h.assigned_user_id,
+    h.order_confirmation_date,
+    h.purchaser_code,
+    l.subsidiary,
 
-    /* composite key with explicit collation on both operands */
-    CONCAT(
-        l.[Subsidiary] COLLATE Latin1_General_100_CI_AS,
-        l.[No_]        COLLATE Latin1_General_100_CI_AS
-    )                                                             AS item_index,
-    /* composite vendor key with explicit collation */
-    CONCAT(
-        l.[Subsidiary] COLLATE Latin1_General_100_CI_AS,
-        l.[Buy-from Vendor No_] COLLATE Latin1_General_100_CI_AS
-    )                                                             AS vendor_index
+    /* ---------- composite indexes --------------------------- */
+    CONCAT(l.subsidiary COLLATE Latin1_General_100_CI_AS,
+           l.item_no   COLLATE Latin1_General_100_CI_AS)      AS item_index,
+    CONCAT(l.subsidiary COLLATE Latin1_General_100_CI_AS,
+           l.buy_from_vendor_no COLLATE Latin1_General_100_CI_AS) AS vendor_index
 
-FROM #LineData l
-JOIN #HeaderData h
-      ON l.[Document No_] = h.[Doc_No_]
+FROM   #LineData  l
+JOIN   #HeaderData h ON l.document_no = h.doc_no
 
-/* ---------- 1-year baseline (item) ---------- */
-OUTER APPLY (
-    SELECT SUM(ld.Quantity*ld.[Unit Cost]) /
-           NULLIF(SUM(ld.Quantity),0) AS avg_price
-    FROM   #LineData ld
-    JOIN   #HeaderData hd
-           ON ld.[Document No_] = hd.[Doc_No_]
-    WHERE  ld.[Type]='Item'
-      AND  ld.[No_] = l.[No_]
-      AND  hd.[Order Date] BETWEEN DATEADD(day,-@w1y,h.[Order Date])
-                               AND     h.[Order Date]-1
-) b1y
-/* ---------- 2-year baseline (item) ---------- */
-OUTER APPLY (
-    SELECT SUM(ld.Quantity*ld.[Unit Cost]) /
-           NULLIF(SUM(ld.Quantity),0) AS avg_price
-    FROM   #LineData ld
-    JOIN   #HeaderData hd
-           ON ld.[Document No_] = hd.[Doc_No_]
-    WHERE  ld.[Type]='Item'
-      AND  ld.[No_] = l.[No_]
-      AND  hd.[Order Date] BETWEEN DATEADD(day,-@w2y,h.[Order Date])
-                               AND     h.[Order Date]-1
-) b2y
-/* ---------- 1-year baseline (item+vendor) ---------- */
-OUTER APPLY (
-    SELECT SUM(ld.Quantity*ld.[Unit Cost]) /
-           NULLIF(SUM(ld.Quantity),0) AS avg_price_vendor
-    FROM   #LineData ld
-    JOIN   #HeaderData hd
-           ON ld.[Document No_] = hd.[Doc_No_]
-    WHERE  ld.[Type]='Item'
-      AND  ld.[No_] = l.[No_]
-      AND  ld.[Buy-from Vendor No_] = l.[Buy-from Vendor No_]
-      AND  hd.[Order Date] BETWEEN DATEADD(day,-@w1y,h.[Order Date])
-                               AND     h.[Order Date]-1
-) b1y_v
-/* ---------- 2-year baseline (item+vendor) ---------- */
-OUTER APPLY (
-    SELECT SUM(ld.Quantity*ld.[Unit Cost]) /
-           NULLIF(SUM(ld.Quantity),0) AS avg_price_vendor
-    FROM   #LineData ld
-    JOIN   #HeaderData hd
-           ON ld.[Document No_] = hd.[Doc_No_]
-    WHERE  ld.[Type]='Item'
-      AND  ld.[No_] = l.[No_]
-      AND  ld.[Buy-from Vendor No_] = l.[Buy-from Vendor No_]
-      AND  hd.[Order Date] BETWEEN DATEADD(day,-@w2y,h.[Order Date])
-                               AND     h.[Order Date]-1
-) b2y_v
-/* ---------- most-recent prior purchase (any vendor) ---------- */
-OUTER APPLY (
-    SELECT TOP 1
-           ld.[Unit Cost] AS last_unit_cost,
-           CASE WHEN v_prev.[Country_Region Code]='HK' THEN 'CN'
-                ELSE v_prev.[Country_Region Code] END AS last_vendor_country
-    FROM   #LineData ld
-    JOIN   #HeaderData hd
-           ON ld.[Document No_] = hd.[Doc_No_]
-    LEFT   JOIN [dbo].[IPG Laser GmbH$Vendor] v_prev
-           ON ld.[Buy-from Vendor No_] = v_prev.[No_]
-    WHERE  ld.[Type]='Item'
-      AND  ld.[No_] = l.[No_]
-      AND  hd.[Order Date] < h.[Order Date]
-    ORDER BY hd.[Order Date] DESC,
-             ld.[Document No_] DESC,
-             ld.[Line No_] DESC
-) last
-/* ---------- most-recent prior purchase (same vendor) ---------- */
-OUTER APPLY (
-    SELECT TOP 1 ld.[Unit Cost] AS last_unit_cost_vendor
-    FROM   #LineData ld
-    JOIN   #HeaderData hd
-           ON ld.[Document No_] = hd.[Doc_No_]
-    WHERE  ld.[Type]='Item'
-      AND  ld.[No_] = l.[No_]
-      AND  ld.[Buy-from Vendor No_] = l.[Buy-from Vendor No_]
-      AND  hd.[Order Date] < h.[Order Date]
-    ORDER BY hd.[Order Date] DESC,
-             ld.[Document No_] DESC,
-             ld.[Line No_] DESC
-) last_v
-/* ---------- single-source count ---------- */
-OUTER APPLY (
-    SELECT COUNT(DISTINCT ld.[Buy-from Vendor No_]) AS vendor_cnt
-    FROM   #LineData ld
-    JOIN   #HeaderData hd2
-           ON ld.[Document No_] = hd2.[Doc_No_]
-    WHERE  ld.[Type]='Item'
-      AND  ld.[No_] = l.[No_]
-      AND  hd2.[Order Date] <= h.[Order Date]
-) ss
-/* ---------- high-volume PO & spend ---------- */
-OUTER APPLY (
-    SELECT COUNT(DISTINCT hd3.[Doc_No_])      AS po_cnt,
-           SUM(ld3.Quantity*ld3.[Unit Cost])  AS spend_amt
-    FROM   #LineData ld3
-    JOIN   #HeaderData hd3
-           ON ld3.[Document No_] = hd3.[Doc_No_]
-    WHERE  ld3.[Type]='Item'
-      AND  ld3.[No_] = l.[No_]
-      AND  hd3.[Order Date] BETWEEN DATEADD(day,-@hv_window,h.[Order Date])
-                                AND     h.[Order Date]-1
-) hv
-/* ---------- adaptive baselines ---------- */
-OUTER APPLY (
-    SELECT
-        CASE
-            WHEN b1y.avg_price       IS NOT NULL THEN b1y.avg_price
-            WHEN b2y.avg_price       IS NOT NULL THEN b2y.avg_price
-            WHEN last.last_unit_cost IS NOT NULL THEN last.last_unit_cost
-            ELSE l.[Unit Cost]
-        END                                             AS baseline_unit_cost,
-        CASE
-            WHEN b1y_v.avg_price_vendor      IS NOT NULL THEN b1y_v.avg_price_vendor
-            WHEN b2y_v.avg_price_vendor      IS NOT NULL THEN b2y_v.avg_price_vendor
-            WHEN last_v.last_unit_cost_vendor IS NOT NULL THEN last_v.last_unit_cost_vendor
-            ELSE
-                CASE
-                    WHEN b1y.avg_price       IS NOT NULL THEN b1y.avg_price
-                    WHEN b2y.avg_price       IS NOT NULL THEN b2y.avg_price
-                    WHEN last.last_unit_cost IS NOT NULL THEN last.last_unit_cost
-                    ELSE l.[Unit Cost]
-                END
-        END                                             AS baseline_unit_cost_vendor
-) bl
-
+/* ---------- Baseline / KPI helper blocks ------------------- */
+OUTER APPLY ( /* 1‑y item */           SELECT SUM(ld.quantity*ld.unit_cost)/
+                                            NULLIF(SUM(ld.quantity),0) AS avg_price
+                                       FROM #LineData ld
+                                       JOIN #HeaderData hd ON ld.document_no = hd.doc_no
+                                       WHERE ld.type_numeric=2 AND ld.item_no=l.item_no
+                                         AND hd.order_date BETWEEN DATEADD(day,-@w1y,h.order_date)
+                                                               AND     h.order_date-1 ) b1y
+OUTER APPLY ( /* 2‑y item */           SELECT SUM(ld.quantity*ld.unit_cost)/
+                                            NULLIF(SUM(ld.quantity),0) AS avg_price
+                                       FROM #LineData ld
+                                       JOIN #HeaderData hd ON ld.document_no = hd.doc_no
+                                       WHERE ld.type_numeric=2 AND ld.item_no=l.item_no
+                                         AND hd.order_date BETWEEN DATEADD(day,-@w2y,h.order_date)
+                                                               AND     h.order_date-1 ) b2y
+OUTER APPLY ( /* 1‑y item+vendor */    SELECT SUM(ld.quantity*ld.unit_cost)/
+                                            NULLIF(SUM(ld.quantity),0) AS avg_price_vendor
+                                       FROM #LineData ld
+                                       JOIN #HeaderData hd ON ld.document_no = hd.doc_no
+                                       WHERE ld.type_numeric=2 AND ld.item_no=l.item_no
+                                         AND ld.buy_from_vendor_no=l.buy_from_vendor_no
+                                         AND hd.order_date BETWEEN DATEADD(day,-@w1y,h.order_date)
+                                                               AND     h.order_date-1 ) b1y_v
+OUTER APPLY ( /* 2‑y item+vendor */    SELECT SUM(ld.quantity*ld.unit_cost)/
+                                            NULLIF(SUM(ld.quantity),0) AS avg_price_vendor
+                                       FROM #LineData ld
+                                       JOIN #HeaderData hd ON ld.document_no = hd.doc_no
+                                       WHERE ld.type_numeric=2 AND ld.item_no=l.item_no
+                                         AND ld.buy_from_vendor_no=l.buy_from_vendor_no
+                                         AND hd.order_date BETWEEN DATEADD(day,-@w2y,h.order_date)
+                                                               AND     h.order_date-1 ) b2y_v
+OUTER APPLY ( /* last purchase – any vendor */ SELECT TOP 1
+                                                ld.unit_cost                            AS last_unit_cost,
+                                                CASE WHEN v_prev.[Country_Region Code]='HK' THEN 'CN'
+                                                     ELSE v_prev.[Country_Region Code] END AS last_vendor_country
+                                               FROM #LineData ld
+                                               JOIN #HeaderData hd ON ld.document_no = hd.doc_no
+                                               LEFT JOIN [dbo].[IPG Laser GmbH$Vendor] v_prev
+                                                      ON ld.buy_from_vendor_no = v_prev.[No_]
+                                               WHERE ld.type_numeric=2 AND ld.item_no=l.item_no
+                                                 AND hd.order_date < h.order_date
+                                               ORDER BY hd.order_date DESC,
+                                                        ld.document_no DESC,
+                                                        ld.line_no DESC ) last
+OUTER APPLY ( /* last purchase – same vendor */ SELECT TOP 1
+                                                 ld.unit_cost AS last_unit_cost_vendor
+                                               FROM #LineData ld
+                                               JOIN #HeaderData hd ON ld.document_no = hd.doc_no
+                                               WHERE ld.type_numeric=2 AND ld.item_no=l.item_no
+                                                 AND ld.buy_from_vendor_no = l.buy_from_vendor_no
+                                                 AND hd.order_date < h.order_date
+                                               ORDER BY hd.order_date DESC,
+                                                        ld.document_no DESC,
+                                                        ld.line_no DESC ) last_v
+OUTER APPLY ( /* vendor count */              SELECT COUNT(DISTINCT ld.buy_from_vendor_no) AS vendor_cnt
+                                               FROM #LineData ld
+                                               JOIN #HeaderData hd2 ON ld.document_no = hd2.doc_no
+                                               WHERE ld.type_numeric=2 AND ld.item_no=l.item_no
+                                                 AND hd2.order_date <= h.order_date ) ss
+OUTER APPLY ( /* rolling‑year PO/spend */      SELECT COUNT(DISTINCT hd3.doc_no)  AS po_cnt,
+                                                      SUM(ld3.quantity*ld3.unit_cost) AS spend_amt
+                                               FROM #LineData ld3
+                                               JOIN #HeaderData hd3 ON ld3.document_no = hd3.doc_no
+                                               WHERE ld3.type_numeric=2 AND ld3.item_no=l.item_no
+                                                 AND hd3.order_date BETWEEN DATEADD(day,-@hv_window,h.order_date)
+                                                                       AND     h.order_date-1 ) hv
+OUTER APPLY ( /* adaptive baselines */         SELECT
+                                                   /* item baseline */
+                                                   CASE WHEN b1y.avg_price IS NOT NULL THEN b1y.avg_price
+                                                        WHEN b2y.avg_price IS NOT NULL THEN b2y.avg_price
+                                                        WHEN last.last_unit_cost IS NOT NULL THEN last.last_unit_cost
+                                                        ELSE l.unit_cost END                       AS baseline_unit_cost,
+                                                   /* vendor baseline */
+                                                   CASE WHEN b1y_v.avg_price_vendor IS NOT NULL THEN b1y_v.avg_price_vendor
+                                                        WHEN b2y_v.avg_price_vendor IS NOT NULL THEN b2y_v.avg_price_vendor
+                                                        WHEN last_v.last_unit_cost_vendor IS NOT NULL THEN last_v.last_unit_cost_vendor
+                                                        ELSE
+                                                            CASE WHEN b1y.avg_price IS NOT NULL THEN b1y.avg_price
+                                                                 WHEN b2y.avg_price IS NOT NULL THEN b2y.avg_price
+                                                                 WHEN last.last_unit_cost IS NOT NULL THEN last.last_unit_cost
+                                                                 ELSE l.unit_cost END
+                                                   END                                             AS baseline_unit_cost_vendor ) bl
 LEFT JOIN #Receipts r
-       ON l.[Document No_] = r.order_no
-      AND l.[Line No_]     = r.line_no
-      AND l.[No_]          = r.item_no
-
+       ON r.order_no = l.document_no
+      AND r.line_no  = l.line_no
+      AND r.item_no  = l.item_no
 LEFT JOIN [dbo].[IPG Laser GmbH$Vendor] v
-       ON l.[Buy-from Vendor No_] = v.[No_];
+       ON l.buy_from_vendor_no = v.[No_];

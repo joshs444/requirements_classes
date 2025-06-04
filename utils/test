@@ -1,0 +1,197 @@
+"""
+order_summary_tables.py – v2.0 (03 Jun 2025)
+──────────────────────────────────────────────────────────────
+Build clean summary tables for:
+    • Overdue POs          → build_overdue_summary()
+    • Unconfirmed POs      → build_unconfirmed_summary()
+    • No Promised Date     → build_no_promise_summary()
+
+Change log
+──────────
+• v2.0 (03 Jun 2025) – **Uses authoritative buyer roster (static mapping) so every name appears, even when counts = 0; sorted A-Z.**
+• v1.7 (03 Jun 2025) – Always include every buyer name; sort summaries alphabetically
+• v1.6 (03 Jun 2025) – Replaced DateLabel filter with max("Snapshot Date") filter
+• v1.5 (03 Jun 2025) – Removed all disk and in-process caching
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Dict, List
+
+import pandas as pd
+from data_access.nav_database import get_engine, load_sql_file
+
+# ── CONFIG ──────────────────────────────────────────────────
+_SNAPSHOT_DATE_COL = "Snapshot Date"  # single source of truth
+
+# Static NAV-login → Full-name roster ----------------------------------------
+_NAV_TO_FULL: Dict[str, str] = {
+    "CCURTIS": "Christine Curtis",
+    "DFAZZUOLI": "David Fazzouli",
+    "DGRIMALA": "Dennis Grimala",
+    "IPG-DOMAIN/BLOCKE": "Bob Locke",
+    "IPG-DOMAIN/EAKOULENOK": "Elena Akoulenok",
+    "IPG-DOMAIN/HLIMA": "Helena Soares",
+    "IPG-DOMAIN/LMORRISON": "Lindsay Morrison",
+    "IPG-DOMAIN/NSTEEL": "Nick Steel",
+    "IPG-DOMAIN/SHERNANDEZ": "Silvio Hernandez",
+    "JFRAIN": "Jack Frain",
+    "K_SEEK": "Kim Seek",
+    "KAMCGRATH": "Kathleen McGrath",
+    "S_BERARD": "Susan Berard",
+    "S_LIER": "Susan Lier",
+    "SRENNER": "Steven Renner",
+    "T_EDDY": "Tammy Eddy",
+    "IPG-DOMAIN/JMAGNUSON": "Jim Magnuson",
+    "IPG-DOMAIN/JMULLIGAN": "Jennifer Mulligan",
+    "IPG-DOMAIN/KENGEN": "Kimberly Engen",
+    "IPG-DOMAIN/MFRIEDLEY": "Mike Friedley",
+    "IPG-DOMAIN/PBARNES": "Phillip Barnes",
+    "IPG-DOMAIN/APERLOV": "Annie Perlov",
+    "IPG-DOMAIN/CBATALLAS": "Charlotte Batallas",
+    "IPG-DOMAIN/MMARSH": "Matthew Marsh",
+    "IPG-DOMAIN/JDESOUSA": "Jacquie De Sousa",
+    "IPG-DOMAIN/RKHEN": "Ronen Chen",
+    "IPG-DOMAIN/EALEXEEVA": "Eugen Alexeev",
+    "IPG-DOMAIN/AAHRENKIEL": "Andrew Ahrenkiel",
+    "IPG-DOMAIN/KOLSON": "Kristin Olson",
+    "IPG-DOMAIN/HSOARES": "Helena Soares",  # duplicate login → same person
+}
+_ALL_BUYERS: List[str] = sorted(set(_NAV_TO_FULL.values()))
+
+# ── snapshot loader (fresh each call) ───────────────────────
+
+def _load_snapshot() -> pd.DataFrame:
+    """Return a fresh snapshot DataFrame (no caching)."""
+    sql_path = Path(__file__).resolve().parents[1] / "sql" / "snapshot_all.sql"
+    return load_sql_file(sql_path, get_engine())
+
+# ── helpers ─────────────────────────────────────────────────
+
+def _latest_snapshot_date(df: pd.DataFrame) -> pd.Timestamp:
+    """Return the most recent date in the snapshot column."""
+    return df.loc[df["Data Type"] == "Snapshot", _SNAPSHOT_DATE_COL].max()
+
+
+def _map_to_full_names(df: pd.DataFrame) -> pd.DataFrame:
+    """Add a canonical 'Full Name' column based on NAV login mapping."""
+    df["Full Name"] = (
+        df["Employee Name"].astype(str).str.strip().map(_NAV_TO_FULL).fillna(df["Employee Name"].str.strip())
+    )
+    return df
+
+
+def _ensure_all_names(summary: pd.DataFrame) -> pd.DataFrame:
+    """Add missing buyers with zeroes and sort A→Z."""
+    out = (
+        pd.DataFrame({"Full Name": _ALL_BUYERS})
+        .merge(summary, on="Full Name", how="left")
+        .fillna(0)
+        .sort_values("Full Name")
+        .reset_index(drop=True)
+    )
+
+    # cast numeric cols to int
+    for col in out.columns:
+        if col != "Full Name":
+            out[col] = out[col].astype(int)
+    return out
+
+# ── generic summary builder ────────────────────────────────
+
+def _build_summary(
+    *,
+    status_col: str,
+    status_value: str,
+    repeated_col: str | None = None,
+    count_repeated_name: str | None = None,
+) -> pd.DataFrame:
+    """Return a raw (unformatted) summary DataFrame for a given status flag."""
+
+    df = _map_to_full_names(_load_snapshot())
+    latest_date = _latest_snapshot_date(df)
+
+    # filter to latest snapshot & status
+    filtered = df.loc[
+        (df["Data Type"] == "Snapshot") &
+        (df[_SNAPSHOT_DATE_COL] == latest_date) &
+        (df[status_col] == status_value) &
+        df["Full Name"].notna() & (df["Full Name"].str.strip() != "")
+    ].copy()
+
+    # aggregate
+    agg_dict = {
+        "Line Count":      ("Full Name", "size"),
+        "PO Count":        ("Document No_", "nunique"),
+        "Lines w Tracking": ("Package Tracking No_", lambda s: s.fillna("").str.strip().ne("").sum()),
+    }
+
+    if repeated_col and count_repeated_name:
+        agg_dict[count_repeated_name] = (
+            repeated_col,
+            lambda s: (s.fillna("").str.strip().str.casefold() == "on last report").sum(),
+        )
+
+    summary = (
+        filtered
+        .groupby("Full Name", dropna=False)
+        .agg(**agg_dict)
+        .reset_index()
+    )
+
+    return _ensure_all_names(summary)
+
+# ── builders ────────────────────────────────────────────────
+
+def build_overdue_summary() -> pd.DataFrame:
+    return _build_summary(
+        status_col="Overdue_Status",
+        status_value="Overdue",
+        repeated_col="Overdue On Last Report",
+        count_repeated_name="From Last Week",
+    )
+
+
+def build_unconfirmed_summary() -> pd.DataFrame:
+    summary = _build_summary(
+        status_col="Unconfirmed_Status",
+        status_value="Unconfirmed",
+        repeated_col="Unconfirmed On Last Report",
+        count_repeated_name="From Last Week",
+    )
+    return summary[["Full Name", "PO Count", "From Last Week"]]
+
+
+def build_no_promise_summary() -> pd.DataFrame:
+    df = _map_to_full_names(_load_snapshot())
+    latest_date = _latest_snapshot_date(df)
+
+    filtered = df.loc[
+        (df["Data Type"] == "Snapshot") &
+        (df[_SNAPSHOT_DATE_COL] == latest_date) &
+        (df["Promise Status"] == "No Promise") &
+        df["Full Name"].notna() & (df["Full Name"].str.strip() != "")
+    ].copy()
+
+    summary = (
+        filtered
+        .groupby("Full Name", dropna=False)
+        .size()
+        .reset_index(name="No Promise Count")
+    )
+
+    return _ensure_all_names(summary)
+
+# ── CLI preview ────────────────────────────────────────────
+if __name__ == "__main__":
+    pd.set_option("display.max_columns", None)
+
+    print("\n── Overdue Summary ──")
+    print(build_overdue_summary().to_string(index=False))
+
+    print("\n── Unconfirmed Summary ──")
+    print(build_unconfirmed_summary().to_string(index=False))
+
+    print("\n── No Promised Date Summary ──")
+    print(build_no_promise_summary().to_string(index=False))
