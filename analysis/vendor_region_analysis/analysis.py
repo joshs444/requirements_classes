@@ -8,19 +8,21 @@ from typing import Dict
 
 import pandas as pd
 
-from purchase.purchase_repository import PurchaseRepository
+from purchase.repository import PurchaseRepository
+from purchase.analytics import PurchaseAnalytics
+from purchase.queries import PurchaseQueries
 from utils.time_utils import TimeUtils
 from analysis.vendor_region_analysis.config import DEFAULT_CFG
 from analysis.vendor_region_analysis.calculators import get_vendor_spend, get_vendor_item_spend
 from analysis.vendor_region_analysis.summary import build_vendor_action_plan
 
-def analyse_vendor_exposure(purchase_df: pd.DataFrame,
+def analyse_vendor_exposure(repo: PurchaseRepository,
                             item_df: pd.DataFrame,
                             cfg: Dict | None = None) -> Dict[str, pd.DataFrame]:
     """Analyze vendor exposure for a specific region/country.
     
     Args:
-        purchase_df: DataFrame with purchase data
+        repo: PurchaseRepository instance
         item_df: DataFrame with item data
         cfg: Optional configuration dictionary to override defaults
         
@@ -29,11 +31,14 @@ def analyse_vendor_exposure(purchase_df: pd.DataFrame,
     """
     cfg = {**DEFAULT_CFG, **(cfg or {})}
     start_date, end_date = TimeUtils.get_period_dates("year")
-    repo = PurchaseRepository(purchase_df)
+    
+    # Create analytics and queries from the repository
+    analytics = PurchaseAnalytics(repo)
+    queries = PurchaseQueries(repo)
 
     # Vendor and item spend
-    by_vendor = get_vendor_spend(repo, start_date, end_date, cfg=cfg)
-    by_item = get_vendor_item_spend(repo, item_df, start_date, end_date, cfg=cfg)
+    by_vendor = get_vendor_spend(repo, analytics, queries, start_date, end_date, cfg=cfg)
+    by_item = get_vendor_item_spend(repo, analytics, queries, item_df, start_date, end_date, cfg=cfg)
     vendor_info = build_vendor_action_plan(by_item, cfg)
 
     # Vendor × Item Detail
@@ -61,8 +66,9 @@ def analyse_vendor_exposure(purchase_df: pd.DataFrame,
         "delivered_spend_past_year": "past_year_spend"
     }).reset_index(drop=True)
 
-    alt_all = repo.get_most_recent_purchase_data(
-        data=purchase_df,
+    # Use the new PurchaseQueries for most_recent_purchase_data
+    alt_all = queries.get_most_recent_purchase_data(
+        item_no=None, vendor_name=None,
         fields=["item_no", "vendor_name", "order_date", "unit_cost", "vendor_country"],
         group_by="both"
     ).rename(columns={

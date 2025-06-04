@@ -19,6 +19,10 @@ def configure_logging(level=logging.INFO):
 
 def read_sql_file(file_name):
     """Read an SQL query from a file in the 'sql' directory."""
+    # Remove 'sql/' prefix if it's already in the file_name
+    if file_name.startswith('sql/'):
+        file_name = file_name[4:]  # Remove 'sql/' prefix
+    
     sql_file_path = os.path.join(PROJECT_ROOT, 'sql', file_name)
     with open(sql_file_path, 'r', encoding='utf-8') as file:
         return file.read()

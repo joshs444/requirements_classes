@@ -3,3 +3,7 @@ pyodbc
 sqlalchemy
 openpyxl
 pyyaml
+networkx
+pyarrow
+fastparquet
+xlsxwriter
