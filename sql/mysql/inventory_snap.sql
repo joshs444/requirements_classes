@@ -40,7 +40,7 @@ ALTER TABLE ledger_all
 START TRANSACTION;
 
 /* 0) Parameters to tweak per run */
-SET @sub         = 'US01';            -- subsidiary filter
+SET @sub         = 'US010';            -- subsidiary filter
 SET @slice_start = '2020-01-01';      -- earliest date to keep detailed history
 
 /* 1) Seed opening balances (everything before @slice_start) */
