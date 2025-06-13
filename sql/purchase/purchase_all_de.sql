@@ -1,6 +1,6 @@
 /*************************************************************************************************
-  Procurement Analytics – DE010 (IPG Laser GmbH)  
-  v8.3‑DE‑10  (May 2025)   · column aliases normalised to lower_snake_case
+  Procurement Analytics – DE010 (IPG Laser GmbH)  
+  v8.3-DE-10  (May 2025)   · column aliases normalised to lower_snake_case
 *************************************************************************************************/
 SET NOCOUNT ON;
 
@@ -26,7 +26,7 @@ LatestArchive AS (
         WHERE   l.[Document Type] = 1
           AND   l.[Type]        IN (1,2,4,5)
           AND   l.[Quantity]      > 0
-          AND   l.[Order Date]    > '2019‑12‑31'
+          AND   l.[Order Date]    > '2019-12-31'
     ) x WHERE rn = 1
 ),
 HistoryLines AS (
@@ -44,6 +44,7 @@ HistoryLines AS (
         l.[Promised Receipt Date]                         AS promised_receipt_date,
         l.[Planned Receipt Date]                          AS planned_receipt_date,
         l.[Description]                                   AS description,
+        COALESCE(NULLIF(l.[Currency Code],''),'EUR')      AS currency_code,
         COALESCE(NULLIF(l.[Qty_ per Unit of Measure],0),1) AS qty_factor,
         l.[Quantity]               AS orig_quantity,
         l.[Outstanding Quantity]   AS orig_outstanding_qty,
@@ -66,6 +67,7 @@ OpenLines AS (
         pl.[Promised Receipt Date]                        AS promised_receipt_date,
         pl.[Planned Receipt Date]                         AS planned_receipt_date,
         pl.[Description]                                  AS description,
+        COALESCE(NULLIF(pl.[Currency Code],''),'EUR')      AS currency_code,
         COALESCE(NULLIF(pl.[Qty_ per Unit of Measure],0),1) AS qty_factor,
         pl.[Quantity]               AS orig_quantity,
         pl.[Outstanding Quantity]   AS orig_outstanding_qty,
@@ -90,6 +92,7 @@ SELECT
     s.promised_receipt_date,
     s.planned_receipt_date,
     s.description,
+    s.currency_code,
     s.qty_factor                              AS qty_per_unit_of_measure,
     s.orig_quantity      * s.qty_factor       AS quantity,
     s.orig_outstanding_qty* s.qty_factor      AS outstanding_quantity,
@@ -187,6 +190,7 @@ SELECT
     l.item_no,
     l.cost_center,
     l.location_code,
+    l.currency_code,
 
     /* ---------- Dates, quantity, cost ---------------------- */
     l.expected_receipt_date,
@@ -257,7 +261,7 @@ SELECT
          ) > 3 THEN 0 ELSE 1
     END                                         AS on_time_flag,
 
-    /* ---------- Purchase‑history intelligence -------------- */
+    /* ---------- Purchase-history intelligence -------------- */
     ISNULL(last.last_unit_cost,l.unit_cost)     AS last_unit_cost,
     CASE WHEN l.type_numeric=2 AND last.last_unit_cost IS NULL
          THEN 'yes' ELSE 'no' END               AS first_purchase,
@@ -298,21 +302,21 @@ FROM   #LineData  l
 JOIN   #HeaderData h ON l.document_no = h.doc_no
 
 /* ---------- Baseline / KPI helper blocks ------------------- */
-OUTER APPLY ( /* 1‑y item */           SELECT SUM(ld.quantity*ld.unit_cost)/
+OUTER APPLY ( /* 1-y item */           SELECT SUM(ld.quantity*ld.unit_cost)/
                                             NULLIF(SUM(ld.quantity),0) AS avg_price
                                        FROM #LineData ld
                                        JOIN #HeaderData hd ON ld.document_no = hd.doc_no
                                        WHERE ld.type_numeric=2 AND ld.item_no=l.item_no
                                          AND hd.order_date BETWEEN DATEADD(day,-@w1y,h.order_date)
                                                                AND     h.order_date-1 ) b1y
-OUTER APPLY ( /* 2‑y item */           SELECT SUM(ld.quantity*ld.unit_cost)/
+OUTER APPLY ( /* 2-y item */           SELECT SUM(ld.quantity*ld.unit_cost)/
                                             NULLIF(SUM(ld.quantity),0) AS avg_price
                                        FROM #LineData ld
                                        JOIN #HeaderData hd ON ld.document_no = hd.doc_no
                                        WHERE ld.type_numeric=2 AND ld.item_no=l.item_no
                                          AND hd.order_date BETWEEN DATEADD(day,-@w2y,h.order_date)
                                                                AND     h.order_date-1 ) b2y
-OUTER APPLY ( /* 1‑y item+vendor */    SELECT SUM(ld.quantity*ld.unit_cost)/
+OUTER APPLY ( /* 1-y item+vendor */    SELECT SUM(ld.quantity*ld.unit_cost)/
                                             NULLIF(SUM(ld.quantity),0) AS avg_price_vendor
                                        FROM #LineData ld
                                        JOIN #HeaderData hd ON ld.document_no = hd.doc_no
@@ -320,7 +324,7 @@ OUTER APPLY ( /* 1‑y item+vendor */    SELECT SUM(ld.quantity*ld.unit_cost)/
                                          AND ld.buy_from_vendor_no=l.buy_from_vendor_no
                                          AND hd.order_date BETWEEN DATEADD(day,-@w1y,h.order_date)
                                                                AND     h.order_date-1 ) b1y_v
-OUTER APPLY ( /* 2‑y item+vendor */    SELECT SUM(ld.quantity*ld.unit_cost)/
+OUTER APPLY ( /* 2-y item+vendor */    SELECT SUM(ld.quantity*ld.unit_cost)/
                                             NULLIF(SUM(ld.quantity),0) AS avg_price_vendor
                                        FROM #LineData ld
                                        JOIN #HeaderData hd ON ld.document_no = hd.doc_no
@@ -356,7 +360,7 @@ OUTER APPLY ( /* vendor count */              SELECT COUNT(DISTINCT ld.buy_from_
                                                JOIN #HeaderData hd2 ON ld.document_no = hd2.doc_no
                                                WHERE ld.type_numeric=2 AND ld.item_no=l.item_no
                                                  AND hd2.order_date <= h.order_date ) ss
-OUTER APPLY ( /* rolling‑year PO/spend */      SELECT COUNT(DISTINCT hd3.doc_no)  AS po_cnt,
+OUTER APPLY ( /* rolling-year PO/spend */      SELECT COUNT(DISTINCT hd3.doc_no)  AS po_cnt,
                                                       SUM(ld3.quantity*ld3.unit_cost) AS spend_amt
                                                FROM #LineData ld3
                                                JOIN #HeaderData hd3 ON ld3.document_no = hd3.doc_no

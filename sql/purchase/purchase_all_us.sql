@@ -1,6 +1,6 @@
 /*************************************************************************************************
   Procurement Analytics – FULL STAND-ALONE SCRIPT   (v8.3-US-R2, May 2025)
-  • Same business logic as v8.3-US, but ALL output columns are lower-case with “_”
+  • Same business logic as v8.3-US, but ALL output columns are lower-case with "_"
 **************************************************************************************************/
 
 /* ============================================================ 0. Parameters */
@@ -9,6 +9,7 @@ DECLARE @w2y       INT   = 730;      -- 2-year look-back (days)
 DECLARE @hv_po     INT   = 12;       -- high-volume PO threshold (count)
 DECLARE @hv_spend  MONEY = 100000;   -- high-volume spend threshold ($)
 DECLARE @hv_window INT   = 365;      -- window (days) for hv flags
+DECLARE @on_time_days INT = 4;       -- on-time delivery threshold (business days late)
 SET NOCOUNT ON;
 
 /* ============================================================ 1. #LineData (history + open) */
@@ -28,6 +29,7 @@ SELECT
     src.[Promised Receipt Date],
     src.[Planned Receipt Date],
     src.[Description],
+    src.[Currency Code],
     src.qty_factor                              AS [Qty_ per Unit of Measure],
     src.[Quantity]  * src.qty_factor            AS [Quantity],
     src.[Outstanding Quantity] * src.qty_factor AS [Outstanding Quantity],
@@ -59,6 +61,7 @@ FROM (
         l.[Promised Receipt Date],
         l.[Planned Receipt Date],
         l.[Description],
+        COALESCE(NULLIF(l.[Currency Code],''),'USD') AS [Currency Code],
         COALESCE(NULLIF(l.[Qty_ per Unit of Measure],0),1) AS qty_factor,
         l.[Quantity],
         l.[Outstanding Quantity],
@@ -93,6 +96,7 @@ FROM (
         l.[Promised Receipt Date],
         l.[Planned Receipt Date],
         l.[Description],
+        COALESCE(NULLIF(l.[Currency Code],''),'USD') AS [Currency Code],
         COALESCE(NULLIF(l.[Qty_ per Unit of Measure],0),1),
         l.[Quantity],
         l.[Outstanding Quantity],
@@ -114,33 +118,41 @@ CREATE CLUSTERED INDEX IX_LineData_DocLineItem
 /* ============================================================ 2. #HeaderData */
 IF OBJECT_ID('tempdb..#HeaderData') IS NOT NULL DROP TABLE #HeaderData;
 
+WITH HeaderCTE AS (
+    SELECT
+        [Document Type],[No_],[Order Date],[Posting Date],
+        [Assigned User ID],[Order Confirmation Date],[Purchaser Code],
+        ROW_NUMBER() OVER (PARTITION BY [No_] ORDER BY [Order Date] DESC, [Posting Date] DESC) AS rn
+    FROM (
+        SELECT DISTINCT [Document Type],[No_],[Order Date],[Posting Date],
+               [Assigned User ID],[Order Confirmation Date],[Purchaser Code]
+        FROM [dbo].[IPG Photonics Corporation$Purchase History Header]
+        WHERE [Order Date] > '2018-12-31'
+          AND [Document Type] = 1
+          AND [Buy-from Vendor No_] <> ''
+
+        UNION
+
+        SELECT DISTINCT [Document Type],[No_],[Order Date],[Posting Date],
+               [Assigned User ID],[Order Confirmation Date],[Purchaser Code]
+        FROM [dbo].[IPG Photonics Corporation$Purchase Header]
+        WHERE [Order Date] > '2018-12-31'
+          AND [Document Type] = 1
+          AND [Buy-from Vendor No_] <> ''
+    ) h
+)
 SELECT
-    h.[Document Type],
-    h.[No_]                         AS [Doc_No_],
-    h.[Order Date],
-    h.[Posting Date],
-    h.[Assigned User ID],
-    h.[Order Confirmation Date],
-    h.[Purchaser Code],
-    'US010'                         AS [Subsidiary]
+    [Document Type],
+    [No_]                         AS [Doc_No_],
+    [Order Date],
+    [Posting Date],
+    [Assigned User ID],
+    [Order Confirmation Date],
+    [Purchaser Code],
+    'US010'                       AS [Subsidiary]
 INTO #HeaderData
-FROM (
-    SELECT [Document Type],[No_],[Order Date],[Posting Date],
-           [Assigned User ID],[Order Confirmation Date],[Purchaser Code]
-    FROM [dbo].[IPG Photonics Corporation$Purchase History Header]
-    WHERE [Order Date] > '2018-12-31'
-      AND [Document Type] = 1
-      AND [Buy-from Vendor No_] <> ''
-
-    UNION ALL
-
-    SELECT [Document Type],[No_],[Order Date],[Posting Date],
-           [Assigned User ID],[Order Confirmation Date],[Purchaser Code]
-    FROM [dbo].[IPG Photonics Corporation$Purchase Header]
-    WHERE [Order Date] > '2018-12-31'
-      AND [Document Type] = 1
-      AND [Buy-from Vendor No_] <> ''
-) h;
+FROM HeaderCTE
+WHERE rn = 1;
 
 CREATE UNIQUE CLUSTERED INDEX IX_HeaderData_Doc
         ON #HeaderData ([Doc_No_]);
@@ -179,6 +191,7 @@ SELECT
     l.[No_]                            AS item_no,
     l.[Shortcut Dimension 1 Code]      AS cost_center,
     l.[Location Code]                  AS location_code,
+    l.[Currency Code]                  AS currency_code,
 
     /* ---------- dates / quantities / cost ------------------- */
     l.[Expected Receipt Date]          AS expected_receipt_date,
@@ -242,8 +255,17 @@ SELECT
            - (DATEDIFF(week, l.[Promised Receipt Date], r.posting_date) * 2)
            - CASE WHEN DATENAME(weekday, l.[Promised Receipt Date]) IN ('Saturday','Sunday') THEN 1 ELSE 0 END
            - CASE WHEN DATENAME(weekday, r.posting_date)            IN ('Saturday','Sunday') THEN 1 ELSE 0 END
-        ) > 3 THEN 0 ELSE 1
-    END                                                          AS on_time_flag,
+        ) > @on_time_days THEN 0 ELSE 1
+    END                                                          AS supplier_on_time_flag,
+    CASE
+        WHEN r.posting_date IS NULL THEN NULL
+        WHEN (
+             DATEDIFF(day, l.[Expected Receipt Date], r.posting_date)
+           - (DATEDIFF(week, l.[Expected Receipt Date], r.posting_date) * 2)
+           - CASE WHEN DATENAME(weekday, l.[Expected Receipt Date]) IN ('Saturday','Sunday') THEN 1 ELSE 0 END
+           - CASE WHEN DATENAME(weekday, r.posting_date)            IN ('Saturday','Sunday') THEN 1 ELSE 0 END
+        ) > @on_time_days THEN 0 ELSE 1
+    END                                                          AS buyer_on_time_flag,
 
     /* ---------- purchase-history intelligence --------------- */
     ISNULL(last.last_unit_cost, l.[Unit Cost])                   AS last_unit_cost,

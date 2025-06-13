@@ -32,10 +32,22 @@ WHERE i.[No_] <> '';
 CREATE CLUSTERED INDEX IX_Items_No ON #Items (item_no);
 
 /* ============================================================
-   2.  9-month usage – output & purchases
+   2.  Usage history – 3-, 9- and 12-month windows
    ============================================================ */
-IF OBJECT_ID('tempdb..#Ledger9m') IS NOT NULL DROP TABLE #Ledger9m;
+-- 3-month
+IF OBJECT_ID('tempdb..#Ledger3m') IS NOT NULL DROP TABLE #Ledger3m;
+SELECT
+    le.[Item No_]                                                   AS item_no,
+    SUM(CASE WHEN le.[Entry Type] = 6 THEN le.[Quantity] END)       AS last_3m_output_qty,
+    SUM(CASE WHEN le.[Entry Type] = 0 THEN le.[Quantity] END)       AS last_3m_purchase_qty
+INTO #Ledger3m
+FROM [dbo].[IPG Photonics Corporation$Item Ledger Entry] le
+WHERE le.[Posting Date] >= DATEADD(MONTH, -3, CAST(GETDATE() AS date))
+GROUP BY le.[Item No_];
+CREATE CLUSTERED INDEX IX_Ledger3m ON #Ledger3m (item_no);
 
+-- 9-month  (retained for any other downstream need)
+IF OBJECT_ID('tempdb..#Ledger9m') IS NOT NULL DROP TABLE #Ledger9m;
 SELECT
     le.[Item No_]                                                   AS item_no,
     SUM(CASE WHEN le.[Entry Type] = 6 THEN le.[Quantity] END)       AS last_9m_output_qty,
@@ -44,8 +56,19 @@ INTO #Ledger9m
 FROM [dbo].[IPG Photonics Corporation$Item Ledger Entry] le
 WHERE le.[Posting Date] >= DATEADD(MONTH, -9, CAST(GETDATE() AS date))
 GROUP BY le.[Item No_];
-
 CREATE CLUSTERED INDEX IX_Ledger9m ON #Ledger9m (item_no);
+
+-- 12-month
+IF OBJECT_ID('tempdb..#Ledger12m') IS NOT NULL DROP TABLE #Ledger12m;
+SELECT
+    le.[Item No_]                                                   AS item_no,
+    SUM(CASE WHEN le.[Entry Type] = 6 THEN le.[Quantity] END)       AS last_12m_output_qty,
+    SUM(CASE WHEN le.[Entry Type] = 0 THEN le.[Quantity] END)       AS last_12m_purchase_qty
+INTO #Ledger12m
+FROM [dbo].[IPG Photonics Corporation$Item Ledger Entry] le
+WHERE le.[Posting Date] >= DATEADD(MONTH, -12, CAST(GETDATE() AS date))
+GROUP BY le.[Item No_];
+CREATE CLUSTERED INDEX IX_Ledger12m ON #Ledger12m (item_no);
 
 /* ============================================================
    3.  Open-PO position
@@ -115,15 +138,15 @@ JOIN (
     FROM [dbo].[IPG Photonics Corporation$Purchase Header]
     WHERE [Document Type] = 1
 ) h
-    ON l.[Document No_] = h.document_no
+      ON l.[Document No_] = h.document_no
 LEFT JOIN [dbo].[IPG Photonics Corporation$Vendor] v
-    ON l.[Buy-from Vendor No_] = v.[No_]
+      ON l.[Buy-from Vendor No_] = v.[No_]
 GROUP BY l.[No_], v.[Name],
          CASE WHEN v.[Country_Region Code] = 'HK' THEN 'CN' ELSE v.[Country_Region Code] END,
          h.[Order Date], l.[Document No_], l.[Manufacturer Part No_];
 
 CREATE CLUSTERED INDEX IX_POLines
-    ON #POLines (item_no, order_date DESC, document_no DESC);
+          ON #POLines (item_no, order_date DESC, document_no DESC);
 
 /* ============================================================
    5.  Most-recent PO per item
@@ -151,7 +174,7 @@ WHERE rn = 1;
 CREATE CLUSTERED INDEX IX_LastPurchase ON #LastPurchase (item_no);
 
 /* ============================================================
-   6.  Assemble the item view
+   6.  Assemble the item view (new make_buy logic + no raw_mat_flag)
    ============================================================ */
 WITH base AS (
     SELECT
@@ -181,56 +204,82 @@ WITH base AS (
         it.[Item Category Code]                  AS item_category_code,
         ic.[Parent Category]                     AS parent_category_code,
         ic.[Description]                         AS item_category_description,
-        COALESCE(ls.last_9m_output_qty, 0)       AS last_9m_output_qty,
-        COALESCE(ls.last_9m_purchase_qty, 0)     AS last_9m_purchase_qty,
+
+        /* usage history columns (optional for downstream use) */
+        COALESCE(l3.last_3m_output_qty,  0)      AS last_3m_output_qty,
+        COALESCE(l3.last_3m_purchase_qty,0)      AS last_3m_purchase_qty,
+        COALESCE(l9.last_9m_output_qty,  0)      AS last_9m_output_qty,
+        COALESCE(l9.last_9m_purchase_qty,0)      AS last_9m_purchase_qty,
+        COALESCE(l12.last_12m_output_qty,0)      AS last_12m_output_qty,
+        COALESCE(l12.last_12m_purchase_qty,0)    AS last_12m_purchase_qty,
+
         COALESCE(op.open_purchase_qty, 0)        AS open_purchase_qty,
-        /* replenishment decision */
+
+        /* ───────────────────────  MAKE / BUY  ─────────────────────── */
         CASE
-            WHEN COALESCE(op.open_purchase_qty, 0) > 0 THEN 'Buy'
+            /* 1️⃣  Open PO commits us to BUY */
+            WHEN COALESCE(op.open_purchase_qty,0) > 0 THEN 'Buy'
+
+            /* 2️⃣  Items designed for internal production (default MAKE) */
+            WHEN it.[Item Source] = 3
+              OR it.[Replenishment System] IN (1,2) THEN
+                 CASE
+                     /* 2a ► use 3-month history if any activity */
+                     WHEN (COALESCE(l3.last_3m_output_qty,0) +
+                           COALESCE(l3.last_3m_purchase_qty,0)) > 0
+                         THEN CASE WHEN COALESCE(l3.last_3m_purchase_qty,0) >
+                                         COALESCE(l3.last_3m_output_qty,0)
+                                   THEN 'Buy' ELSE 'Make' END
+                     /* 2b ► else fall back to 12-month history */
+                     WHEN (COALESCE(l12.last_12m_output_qty,0) +
+                           COALESCE(l12.last_12m_purchase_qty,0)) > 0
+                         THEN CASE WHEN COALESCE(l12.last_12m_purchase_qty,0) >
+                                         COALESCE(l12.last_12m_output_qty,0)
+                                   THEN 'Buy' ELSE 'Make' END
+                     /* 2c ► no history ⇒ keep default MAKE */
+                     ELSE 'Make'
+                 END
+
+            /* 3️⃣  Everything else defaults BUY, but flip if we *make* more */
             ELSE
-                CASE
-                    WHEN it.[Item Source] = 3 THEN 'Make'
-                    WHEN it.[Item Source] IN (1,2) THEN 'Buy'
-                    WHEN it.[Replenishment System] IN (1,2) THEN 'Make'
-                    WHEN it.[Replenishment System] = 0 THEN 'Buy'
-                    ELSE 'Unknown'
-                END
-                + CASE
-                    WHEN COALESCE(ls.last_9m_output_qty, 0) > COALESCE(ls.last_9m_purchase_qty, 0)
-                         AND it.[Item Source] NOT IN (3)
-                         AND it.[Replenishment System] = 0 THEN '→Make'
-                    WHEN COALESCE(ls.last_9m_purchase_qty, 0) > COALESCE(ls.last_9m_output_qty, 0)
-                         AND (it.[Item Source] = 3 OR it.[Replenishment System] IN (1,2)) THEN '→Buy'
-                    ELSE ''
-                  END
-        END                                      AS make_buy
+                 CASE
+                     /* 3a ► 3-month history first */
+                     WHEN (COALESCE(l3.last_3m_output_qty,0) +
+                           COALESCE(l3.last_3m_purchase_qty,0)) > 0
+                         THEN CASE WHEN COALESCE(l3.last_3m_output_qty,0) >
+                                         COALESCE(l3.last_3m_purchase_qty,0)
+                                   THEN 'Make' ELSE 'Buy' END
+                     /* 3b ► 12-month history */
+                     WHEN (COALESCE(l12.last_12m_output_qty,0) +
+                           COALESCE(l12.last_12m_purchase_qty,0)) > 0
+                         THEN CASE WHEN COALESCE(l12.last_12m_output_qty,0) >
+                                         COALESCE(l12.last_12m_purchase_qty,0)
+                                   THEN 'Make' ELSE 'Buy' END
+                     /* 3c ► no history ⇒ keep default BUY */
+                     ELSE 'Buy'
+                 END
+        END                                         AS make_buy
     FROM #Items it
     LEFT JOIN [dbo].[IPG Photonics Corporation$Item Category] ic
-        ON it.[Item Category Code] = ic.[Code]
-    LEFT JOIN #Ledger9m ls
-        ON it.item_no = ls.item_no
-    LEFT JOIN #OpenPO op
-        ON it.item_no = op.item_no
+               ON it.[Item Category Code] = ic.[Code]
+    LEFT JOIN #Ledger3m  l3  ON it.item_no = l3.item_no
+    LEFT JOIN #Ledger9m  l9  ON it.item_no = l9.item_no
+    LEFT JOIN #Ledger12m l12 ON it.item_no = l12.item_no
+    LEFT JOIN #OpenPO    op  ON it.item_no = op.item_no
 )
 SELECT
     base.*,
-    /* ─────────── NEW COLUMNS ─────────── */
+    /* ─────────── LAST-PURCHASE ENRICHMENT ─────────── */
     lp.last_vendor_name,
     lp.last_vendor_country,
-    COALESCE(lp.last_purchase_qty, 0)         AS last_purchase_qty,
-    lp.last_unit_cost                         AS last_unit_cost,
-    lp.last_order_date                        AS last_order_date,
-    lp.last_mfg_part_no                       AS last_mfg_part_no,
-    /* raw-material flag */
-    CASE
-         WHEN base.inventory_posting_group = 'FIN GOODS'                    THEN 'No'
-         WHEN base.make_buy = 'Buy'
-              AND base.last_9m_output_qty = 0                               THEN 'Yes'
-         ELSE 'No'
-    END                                         AS raw_mat_flag,
-    /* item index (subsidiary + item_no) */
+    COALESCE(lp.last_purchase_qty,0)            AS last_purchase_qty,
+    lp.last_unit_cost                           AS last_unit_cost,
+    lp.last_order_date                          AS last_order_date,
+    lp.last_mfg_part_no                         AS last_mfg_part_no,
+
+    /* ITEM INDEX (subsidiary prefix + item) */
     CONCAT('US010', base.item_no)               AS item_index
 FROM base
 LEFT JOIN #LastPurchase lp
-    ON base.item_no = lp.item_no
+       ON base.item_no = lp.item_no
 ORDER BY base.row_index;
